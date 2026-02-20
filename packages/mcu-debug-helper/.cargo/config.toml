@@ -1,5 +1,5 @@
 [env]
-TS_RS_EXPORT_DIR = { value = "../shared/dasm-helper", relative = true }
+TS_RS_EXPORT_DIR = { value = "../shared", relative = true }
 TS_RS_LARGE_INT = "number"
 
 # Cross-compilation linker configuration for building on macOS

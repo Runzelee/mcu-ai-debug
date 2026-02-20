@@ -282,6 +282,22 @@ export enum SessionMode {
     Attach = "attach",
     Reset = "reset",
 }
+
+export interface HostConfig {
+    // User-facing fields (set in launch.json)
+    type: "auto" | "ssh" | "local"; // "local" is internal/testing only, not exposed in package.json schema
+    sshHost?: string; // Required when type === "ssh"
+    syncFiles?: string[];
+
+    // Private/calculated fields — set by the frontend (which has VS Code APIs)
+    // before passing ConfigurationArguments to the DA (which has no VS Code APIs).
+    // The frontend resolves vscode.env.remoteName and computes the correct values.
+    pvtProxyHost?: string; // Resolved proxy host: "127.0.0.1", "host.docker.internal", gateway IP, etc.
+    pvtProxyPort?: number; // Port assigned by the OS when the proxy started (from Discovery JSON)
+    pvtProxyToken?: string; // Secret token printed in Discovery JSON, validated on connect
+    pvtSshTunnelLocalPort?: number; // Local port of the SSH -L tunnel (ssh type only)
+}
+
 export interface ConfigurationArguments extends DebugProtocol.LaunchRequestArguments {
     name: string;
     request: string;
@@ -321,6 +337,7 @@ export interface ConfigurationArguments extends DebugProtocol.LaunchRequestArgum
     pvtRttConfig: RTTConfiguration;
     swoConfig: SWOConfiguration;
     liveWatch: LiveWatchConfig;
+    hostConfig: HostConfig | null;
     graphConfig: any[];
     /// Triple slashes will cause the line to be ignored by the options-doc.py script
     /// We don't expect the following to be in booleann form or have the value of 'none' after

@@ -38,6 +38,9 @@ packages/*/target/
 packages/*/node_modules/
 packages/mcu-debug/bin/
 
+# ts_rs default bindings output (real exports go to packages/shared/)
+packages/mcu-debug-helper/bindings/
+
 # Go build outputs
 packages/proxy-server/bin/
 packages/proxy-server/*.exe

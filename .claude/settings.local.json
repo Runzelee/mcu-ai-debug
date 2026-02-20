@@ -5,7 +5,8 @@
       "Bash(cargo build:*)",
       "Bash(cargo test:*)",
       "Bash(npm run compile:*)",
-      "Bash(cargo run:*)"
+      "Bash(cargo run:*)",
+      "Bash(cargo check:*)"
     ]
   }
 }

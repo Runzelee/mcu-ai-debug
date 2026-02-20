@@ -25,7 +25,7 @@ In this case, the client decides the strategy and the number of ports needed. Th
 
 The server shall, for each port, wait until the port is open and simply provide a bidirectional transfer of data with zero buffering. For each host port, there is a corresponding local port.
 
-There is a special case and the most prevalent case where the client and server are running on the same machine. In this case, the server will not be involved, but the client will not care if the host is 1127.0.0.1 or something else
+There is a special case and the most prevalent case where the client and server are running on the same machine. In this case, the server will not be involved, but the client will not care if the host is 127.0.0.1 or something else
 
 **The most critical information needed is the IP address of the host computer**
 But what starts the Probe Agent? There are a couple of possibilities
@@ -60,7 +60,7 @@ With VSCode as an example, we have the following
 flowchart TD
     subgraph "VSCode (Local OS)"
     S["gdb-server"]
-    CD["Cortex-Debug
+    CD["MCU-Debug
     (UI)"]
     PAL["Probe Agent(local)"]
     PAL <--> S
@@ -68,7 +68,7 @@ flowchart TD
     end
 
     subgraph "VSCode Server (Remote OS)"
-    DA["Cortex-Debug
+    DA["MCU-Debug
     (Debug Adapter)"] <--> GDB <--> SRC["Source Code, Elf"]
     PAR["Probe Agent(remote)"]
     DA --> PAR
@@ -194,11 +194,11 @@ For **GDB**, **SWO**, and **RTT**, we should skip JSON entirely once the stream 
 2. **GDB Data:** `[ID:1][Len:4096][...raw binary bytes...]`
 3. **RTT Data:** `[ID:3][Len:12][...raw RTT string...]`
 
-### Why this structure works for you:
+### Why this structure works
 
 * **Agnostic:** The "Funnel" doesn't need to know *what* is in Stream 1. It just moves the bytes.
 * **Responsive:** Because the header is only 5 bytes, the latency is negligible.
-* **Secure:** By checking the `token` in the `initialize` call, you prevent anyone else on the remote host from hijacking your gdb-server proxy.
+* **Secure:** By checking the `token` in the `initialize` call, we prevent anyone else on the remote host from hijacking the gdb-server proxy.
 
 In the world of TCP, the odds of a packet being "broken up" are **100%**.
 
@@ -292,6 +292,141 @@ await this.rspReady.promise;
 ```
 
 ---
+
+## User Experience
+
+### Design Principles
+
+The remote proxy flow must be **strictly opt-in**. Users debugging locally (the vast majority) should never encounter `hostConfig`, proxy settings, or SSH references. When `hostConfig` is absent from `launch.json`, everything works exactly as it does today — no proxy, no staging, no network.
+
+For remote users, the configuration should be **portable and shareable** — a team member should be able to clone a repo, adjust their SSH host alias, and start debugging. The repo should not contain machine-specific paths or secrets.
+
+### 1. GNU Toolchain Paths (Client-Side)
+
+These tools run where the source code lives (the Debug Adapter side), so they are unaffected by remote proxy setup.
+
+- **gdb**: The only required path. Users configure this in workspace settings or `launch.json`.
+- **objdump**: Derived automatically from the gdb path (same prefix, swap the binary name). Can be overridden explicitly if needed.
+
+No changes needed here for remote support.
+
+### 2. GDB-Server Paths (Host-Side)
+
+These run on the host where the USB probe is attached. The paths must be valid on the host OS.
+
+- Users configure the gdb-server path in `launch.json` via `serverpath` (as today). When using a remote host, this path must refer to the host filesystem.
+- **No auto-discovery on the host.** Auto-discovery for STM tools (CubeCLT, CubeIDE) is complex and host-specific. We do not replicate it on the proxy side. Users must provide explicit paths. This is acceptable because remote users are typically more advanced (lab setups, CI pipelines) and already know where their tools are installed.
+- **ST-Link CWD quirk:** ST-Link's `ST-LINK_gdbserver` must be launched from its install directory (it fails to find its own shared libraries otherwise). The proxy handles this: when `servertype` is `stlink`, the proxy sets the gdb-server's CWD to `dirname(serverpath)` automatically. See `server-session.ts:getServerCwd()` for the existing local implementation.
+
+### 3. Workspace Config Files (Staging)
+
+This is the core UX problem. GDB-server config files (e.g., OpenOCD `.cfg`) are often workspace-relative, but the gdb-server runs on the host where those files don't exist.
+
+**Solution: File staging via the proxy.**
+
+The extension copies workspace files to a temporary staging directory on the host before launching the gdb-server. The proxy manages the staging directory lifecycle.
+
+**How it works:**
+
+1. User lists files to stage in `launch.json` via `syncFiles` (glob patterns resolved relative to `${workspaceFolder}`)
+2. Before gdb-server launch, the Debug Adapter sends file contents to the proxy via the `stageFiles` JSON-RPC method
+3. The proxy writes them to `~/.mcu-debug/staging/<session-id>/` and returns the staging path
+4. The Debug Adapter rewrites the gdb-server command line, replacing workspace-relative file paths with staged host paths
+5. The proxy sets the gdb-server's CWD to the staging directory root (so relative `source` directives in OpenOCD `.cfg` files resolve correctly)
+6. On session end, the proxy cleans up the staging directory
+
+**Edge case — config files that reference other files:** An OpenOCD `.cfg` may contain `source [find my-other-file.cfg]`. If `my-other-file.cfg` is also a workspace file, it must be listed in `syncFiles` too. For v1, this is the user's responsibility (they know their config file dependencies). A future enhancement could scan `.cfg` files for `source` directives and auto-stage recursively.
+
+**Users who manage their own host files** can skip `syncFiles` entirely and provide host-absolute paths in the gdb-server arguments. The staging mechanism is a convenience, not a requirement.
+
+### Central Server Launch Point
+
+All gdb-server types (OpenOCD, J-Link, PyOCD, ST-Link, etc.) converge to a single launch point in `GDBServerSession.startServer()` (see `server-session.ts`). The existing flow is:
+
+```
+1. getTCPPorts()                         — allocate TCP ports locally
+2. serverController.serverArguments()    — each server describes its needs as args
+3. getServerCwd()                        — determine working directory
+4. child_process.spawn()                 — launch the gdb-server locally
+```
+
+The remote proxy hook is inserted between steps 2 and 4. When `hostConfig` is present, the launch point switches from local to remote execution:
+
+```
+1. getTCPPorts()                         — allocate ports on HOST (via proxy) instead of locally
+2. serverController.serverArguments()    — unchanged, each server describes its needs
+3. getServerCwd()                        — unchanged (ST-Link CWD quirk handled by proxy)
+   --- remote proxy path ---
+3.5 stageFiles()                         — send syncFiles to proxy, receive staging dir path
+3.6 rewriteArgs()                        — scan args for workspace-relative paths, replace with staged paths
+4. proxy.launchServer()                  — delegate spawn to proxy instead of local child_process.spawn
+```
+
+**This design means individual server controllers never change.** Each server's `serverArguments()` returns the same command-line args regardless of whether the session is local or remote. The staging, path rewriting, and remote spawn are handled centrally at the launch point. This ensures:
+
+- New server types automatically get remote support without any extra work
+- The rewriting logic lives in one place (easy to audit and debug)
+- Server controllers remain focused on their gdb-server-specific concerns (port mapping, init patterns, argument formatting)
+
+### 4. The `hostConfig` Structure
+
+When present in `launch.json`, enables remote proxy mode. When absent, everything runs locally as today.
+
+```jsonc
+{
+    "hostConfig": {
+        // Required: SSH target. Uses ~/.ssh/config for auth, port, jump hosts, etc.
+        "host": "user@lab-server",      // SSH host (or alias from ~/.ssh/config)
+
+        // Optional: files to stage from workspace to host
+        "syncFiles": [
+            "*.cfg",                     // glob patterns, resolved relative to ${workspaceFolder}
+            "scripts/flash.sh"
+        ]
+    }
+}
+```
+
+**What is NOT in `hostConfig`:**
+- **SSH ports** — handled by `~/.ssh/config` or defaults
+- **Staging directory** — auto-managed by the proxy (`~/.mcu-debug/staging/<session-id>/`)
+- **Tunnel ports** — auto-allocated by the extension and proxy
+- **Credentials** — never touched; SSH handles auth via keys/agent
+
+**Why so minimal?** Every config option is a support burden. The extension manages SSH tunnels, port allocation, proxy deployment, and staging directories automatically. The user provides two things: where to connect (`host`) and what to copy (`syncFiles`).
+
+### 5. SSH Connection Management
+
+**Requirement:** The extension never handles passwords, keys, or secrets. SSH authentication is delegated entirely to the user's SSH configuration and key agent.
+
+**One-time user setup (prerequisite):**
+
+1. Enable SSH server on the host machine (Linux: usually default; macOS: System Settings > Sharing > Remote Login; Windows: install OpenSSH Server)
+2. Set up SSH key-based auth: `ssh-keygen` + `ssh-copy-id user@host`
+3. (Optional but recommended) Create an entry in `~/.ssh/config` for convenience:
+   ```
+   Host lab-server
+       HostName 192.168.1.100
+       User engineer
+       IdentityFile ~/.ssh/id_ed25519
+   ```
+
+**Per-session flow (managed by the extension):**
+
+When a debug session starts with `hostConfig` present:
+
+1. **Connect:** Extension spawns `ssh` as a child process to the configured host
+2. **Deploy:** Check if `mcu-debug-helper` exists and is the correct version on the host. If not, SCP the correct binary for the host architecture (detected via `uname -m`) to `~/.mcu-debug/bin/`
+3. **Launch proxy manually:** `ssh user@host "~/.mcu-debug/bin/mcu-debug-helper proxy --port 0"` — proxy prints discovery JSON to stdout with its assigned port
+4. **Launch proxy by Extention:** This is done by the the extension running on host side. The client side can get the port & token using an API. The client can then do `ssh -L local-port:remote-host:remote-port user@server` automatically
+5. **Tunnel:** Extension sets up SSH port forwarding (`-L`) to the proxy port
+6. **Stage files:** If `syncFiles` is configured, send workspace files to the proxy via the Funnel Protocol
+7. **Debug:** Normal debug session proceeds through the tunnel
+8. **Cleanup:** On session end, extension tears down the SSH connection (which kills the proxy and cleans up staging)
+
+The SSH process is a managed child of the extension — no terminal window for the user to babysit. If the SSH connection drops mid-session, the extension detects it (via heartbeat timeout) and shows a clear error: *"Connection to probe host lost. Debug session ended."*
+
+**Alternative for VS Code Remote SSH users:** If the user is already connected to a remote host via VS Code's Remote SSH extension, and the probe is on their local machine, the roles are reversed: the extension runs on the remote, and the probe host is `localhost`. In this case, `hostConfig.host` can be omitted or set to a loopback, and no SSH tunnel is needed — the proxy runs locally on the VS Code client side via the UI extension split.
 
 ## Implementation Gotchas
 

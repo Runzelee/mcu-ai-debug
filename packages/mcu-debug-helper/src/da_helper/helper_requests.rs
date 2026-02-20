@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
  * the memoryReference as a hex string, and we use i32 for offsets and counts to allow negative values.
  */
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 #[allow(non_snake_case)]
 pub struct DisassembleArguments {
     /** Memory reference to the base location containing the instructions to disassemble. */
@@ -49,7 +49,7 @@ pub struct DisassembleArguments {
 }
 
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 #[allow(non_snake_case)]
 pub struct DisassembleRequest {
     pub req: String, // e.g. "disasm"
@@ -58,7 +58,7 @@ pub struct DisassembleRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 #[allow(non_snake_case)]
 pub struct GlobalsRequest {
     pub req: String, // e.g. "globals"
@@ -66,7 +66,7 @@ pub struct GlobalsRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 #[allow(non_snake_case)]
 pub struct GlobalsResponse {
     pub req: String, // e.g. "globals"
@@ -75,7 +75,7 @@ pub struct GlobalsResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 #[allow(non_snake_case)]
 pub struct StaticsRequest {
     pub req: String, // e.g. "statics"
@@ -84,7 +84,7 @@ pub struct StaticsRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 #[allow(non_snake_case)]
 pub struct StaticsResponse {
     pub req: String, // e.g. "statics"
@@ -93,7 +93,7 @@ pub struct StaticsResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 #[allow(non_snake_case)]
 pub struct SymbolLookupNameRequest {
     pub req: String, // e.g. "symbolLookup"
@@ -104,7 +104,7 @@ pub struct SymbolLookupNameRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 #[allow(non_snake_case)]
 pub struct SymbolLookupAddressRequest {
     pub req: String, // e.g. "symbolLookup"
@@ -113,7 +113,7 @@ pub struct SymbolLookupAddressRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 #[allow(non_snake_case)]
 pub struct SymbolLookupResponse {
     pub req: String, // e.g. "symbolLookup"
@@ -126,7 +126,7 @@ pub struct SymbolLookupResponse {
  * the size of the JSON response for disassembly requests, which can be quite large.
  */
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 #[allow(non_snake_case)]
 pub struct SerInstruction {
     /** Address of the instruction in hexadecimal string format */
@@ -162,7 +162,7 @@ pub struct SerInstruction {
  */
 
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 pub struct DisasmResponse {
     pub req: String, // e.g. "disasm"
     pub seq: u64,
@@ -177,7 +177,7 @@ pub struct DisasmResponse {
  * In TypeScript, this becomes a discriminated union for type-safe event handling.
  */
 #[derive(Serialize, Deserialize, Debug, ts_rs::TS)]
-#[ts(export, export_to = "../../shared/dasm-helper/")]
+#[ts(export, export_to = "dasm-helper/")]
 #[serde(tag = "type")]
 #[allow(non_snake_case)]
 pub enum HelperEvent {
@@ -240,7 +240,7 @@ mod tests {
     /// Explicitly calls export() on each type to trigger file generation.
     #[test]
     fn ensure_ts_exports() {
-        let config = Config::default();
+        let config = Config::from_env();
 
         // Explicitly export all types to trigger file generation
         DisassembleArguments::export(&config).unwrap();

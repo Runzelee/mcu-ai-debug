@@ -392,6 +392,42 @@ module.exports = {
         description: "This is for 'XPERIPHERALS' window provided by 'mcu-debug.peripheral-viewer' and 'Embedded Tools' Extension from Microsoft.",
         type: "string",
     },
+    hostConfig: {
+        type: "object",
+        description:
+            "Enables remote probe support. When present, the gdb-server runs on a host machine that has the USB debug probe attached. " +
+            "Omit this entirely for local debugging (the common case). " +
+            'The "auto" type detects the connection from the VS Code remote environment ' +
+            "(WSL, Dev Container, VS Code Remote SSH, or plain local). " +
+            'The "ssh" type connects explicitly to a separate probe host machine via SSH, ' +
+            "useful for lab setups where the probe is on a dedicated server.",
+        properties: {
+            type: {
+                enum: ["auto", "ssh"],
+                default: "auto",
+                description:
+                    '"auto": extension detects the VS Code remote environment and constructs the correct proxy address automatically. ' +
+                    "Covers WSL (NAT and Mirrored), Dev Containers, VS Code Remote SSH, and plain local. " +
+                    '"ssh": explicit SSH to a separate probe host; requires sshHost.',
+            },
+            sshHost: {
+                type: "string",
+                description:
+                    'SSH host for type "ssh". Resolved via ~/.ssh/config, so host aliases, port, jump hosts, and keys are all handled there. ' +
+                    'Example: "user@lab-server" or an alias defined in ~/.ssh/config.',
+                default: "mylogin@myserver",
+            },
+            syncFiles: {
+                type: "array",
+                description:
+                    "Glob patterns (relative to ${workspaceFolder}) for files to copy to the probe host before the gdb-server starts. " +
+                    "Required when gdb-server config files (e.g. OpenOCD .cfg) live in the workspace but the gdb-server runs remotely. " +
+                    "Files are staged in a per-session temp directory on the host and cleaned up when the session ends.",
+                items: { type: "string" },
+                default: [],
+            },
+        },
+    },
     rttConfig: {
         type: "object",
         description: "SEGGER's Real Time Trace (RTT) and supported by JLink, OpenOCD and perhaps others in the future",

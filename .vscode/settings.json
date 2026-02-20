@@ -12,5 +12,13 @@
     "typescript.tsdk": "node_modules/typescript/lib",
     "rust-analyzer.linkedProjects": [
         "packages/mcu-debug-helper/Cargo.toml"
-    ]
+    ],
+    // Rust debugging configuration
+    "rust-analyzer.debug.engine": "vadimcn.vscode-lldb",
+    "rust-analyzer.debug.engineSettings": {
+        "sourceLanguages": ["rust"]
+    },
+    "rust-analyzer.runnables.extraEnv": {
+        "RUST_BACKTRACE": "1"
+    }
 }

@@ -15,5 +15,6 @@
 //! Common utilities shared between DA helper and proxy helper.
 
 pub mod debug;
+pub mod tcpports;
 pub mod transport;
 pub mod utils;

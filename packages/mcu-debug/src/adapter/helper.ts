@@ -127,7 +127,7 @@ export class DebugHelper {
                 return;
             }
 
-            const helperPath = this.getHelperExecutable();
+            const helperPath = this.getHelperExecPath();
             if (!helperPath) {
                 throw new Error("Helper executable not found");
             }
@@ -198,7 +198,7 @@ export class DebugHelper {
         }
     }
 
-    private getHelperExecPath() {
+    public getHelperExecPath() {
         let helperPath = this.getHelperExecutable();
         try {
             // Quick defensive check before spawning
