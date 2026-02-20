@@ -522,14 +522,15 @@ Multi-probe support (scanning USB bus, returning probe inventory) is deferred to
 
 **Goal:** The VS Code extension can transparently start and connect to a Proxy on a remote host.
 
-- Implement the "Probe-and-Deploy" flow from [Remote-Proxy.md](Remote-Proxy.md):
-  - Version check via SSH (`mcu-debug-helper --version`)
-  - Auto-deploy binary via SCP for detected architecture (`uname -m`)
-  - Launch Proxy via SSH (`ssh user@host "~/.mcu-debug/bin/mcu-debug-helper proxy --port 0 --token <secret>"`)
-- Parse Discovery JSON from Proxy stdout
+- Implement the "Probe-and-Deploy" flow from [Proxy-Plan.md](./Proxy-Plan.md):
+  - Version check via SSH (`mcu-debug-helper proxy --version`)
+  - ~Auto-deploy binary via SCP for detected architecture (`uname -m`)~
+  - Generally launched by the UI side of the extension
+  - Can by manually launched or a servery or via SSH (`ssh user@host "~/.mcu-debug/bin/mcu-debug-helper proxy --port 0 --token <secret>"`)
+- ~Parse Discovery JSON from Proxy stdout~The launcher decides the launch parameters so no discovery is required, but available if needed from JSON on stdout
 - Set up SSH tunnel (`-L` forwarding to Proxy port)
 - Implement the state machine in TypeScript: Connecting → Checking → Deploying → Starting → Tunneling → Ready
-- Configure SSH keepalives (`ServerAliveInterval=15`, `ServerAliveCountMax=3`)
+- Configure session keepalives (`ServerAliveInterval=15`, `ServerAliveCountMax=3`)
 
 **Deliverable:** End-to-end remote debugging — user clicks "Start Debugging" and the extension handles SSH, deployment, tunneling, and cleanup.
 
