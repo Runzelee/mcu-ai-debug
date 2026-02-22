@@ -5,4 +5,11 @@
  * Uses internally-tagged enum serialization so each variant has a 'type' field.
  * In TypeScript, this becomes a discriminated union for type-safe event handling.
  */
-export type HelperEvent = { "type": "SymbolTableReady", session_id: string, version: string, } | { "type": "DisassemblyReady", session_id: string, instruction_count: number, } | { "type": "RTTFound", session_id: string, address: string, } | { "type": "Progress", session_id: string, operation: string, percentage: number | null, message: string | null, } | { "type": "Output", session_id: string, category: string, message: string, } | { "type": "Error", session_id: string, code: string | null, message: string, details: string | null, } | { "type": "Log", session_id: string, level: string, message: string, };
+export type HelperEvent =
+    | { type: "SymbolTableReady"; session_id: string; version: string }
+    | { type: "DisassemblyReady"; session_id: string; instruction_count: number }
+    | { type: "RTTFound"; session_id: string; address: string }
+    | { type: "Progress"; session_id: string; operation: string; percentage: number | null; message: string | null }
+    | { type: "Output"; session_id: string; category: string; message: string }
+    | { type: "Error"; session_id: string; code: string | null; message: string; details: string | null }
+    | { type: "Log"; session_id: string; level: string; message: string };

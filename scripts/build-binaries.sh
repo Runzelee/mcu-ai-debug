@@ -15,6 +15,25 @@ mkdir -p "$BINDIR"
 
 mode="${1:-dev}"
 
+PRETTIER="$ROOT_DIR/node_modules/.bin/prettier"
+SHARED_DIR="$ROOT_DIR/packages/shared"
+
+# Run prettier on the ts-rs generated TypeScript files.
+# ts-rs --format is intentionally avoided; it uses a different formatter.
+function format_ts_exports() {
+  if [[ -x "$PRETTIER" ]]; then
+    echo "Formatting generated TypeScript exports..."
+    # Use a narrower print width than the project default (200) so that
+    # generated type literals with many fields are broken across lines.
+    "$PRETTIER" --write --print-width 120 \
+      "$SHARED_DIR/dasm-helper" \
+      "$SHARED_DIR/proxy-protocol" \
+      2>/dev/null || true
+  else
+    echo "Warning: prettier not found at $PRETTIER, skipping format"
+  fi
+}
+
 function host_platform() {
   local os arch
   os=$(uname -s)
@@ -66,6 +85,7 @@ if [[ "$mode" == "dev" ]]; then
   echo "Generating TypeScript exports..."
   cargo test --lib helper_requests::tests::ensure_ts_exports --quiet 2>/dev/null || true
   cargo test --lib host_side::tests::ensure_ts_exports --quiet 2>/dev/null || true
+  format_ts_exports
 
   cargo build --bin "$BIN_NAME"
   host=$(host_platform)
@@ -90,7 +110,7 @@ if [[ "$mode" == "prod" ]]; then
   echo "Generating TypeScript exports..."
   cargo test --lib helper_requests::tests::ensure_ts_exports --quiet 2>/dev/null || true
   cargo test --lib host_side::tests::ensure_ts_exports --quiet 2>/dev/null || true
-
+  format_ts_exports
 
   # platform|target_triple|exe_ext
   # Note: aarch64-pc-windows-gnu not yet in stable Rust, omitted for now

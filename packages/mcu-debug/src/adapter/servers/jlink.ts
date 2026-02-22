@@ -1,5 +1,17 @@
 import { DebugProtocol } from "@vscode/debugprotocol";
-import { GDBServerController, ConfigurationArguments, calculatePortMask, createPortName, SWOConfigureEvent, parseHexOrDecInt, RTTServerHelper, genDownloadCommands, SessionMode } from "./common";
+import {
+    GDBServerController,
+    ConfigurationArguments,
+    calculatePortMask,
+    createPortName,
+    SWOConfigureEvent,
+    parseHexOrDecInt,
+    RTTServerHelper,
+    genDownloadCommands,
+    SessionMode,
+    TcpPortDef,
+    TcpPortDefMap,
+} from "./common";
 import * as os from "os";
 import { EventEmitter } from "events";
 import { commandExists } from "@mcu-debug/shared";
@@ -11,15 +23,11 @@ export class JLinkServerController extends EventEmitter implements GDBServerCont
     public name = "J-Link";
 
     private args = {} as ConfigurationArguments;
-    private ports: { [name: string]: number } = {};
+    public ports: TcpPortDefMap = {};
     private rttHelper: RTTServerHelper = new RTTServerHelper();
 
     constructor() {
         super();
-    }
-
-    public setPorts(ports: { [name: string]: number }): void {
-        this.ports = ports;
     }
 
     public setArguments(args: ConfigurationArguments): void {
@@ -31,7 +39,7 @@ export class JLinkServerController extends EventEmitter implements GDBServerCont
     }
 
     public connectCommands(): string[] {
-        const gdbport = this.ports[createPortName(this.args.targetProcessor)];
+        const gdbport = this.ports[createPortName(this.args.targetProcessor)].localPort;
 
         return [`target-select extended-remote localhost:${gdbport}`];
     }
@@ -130,9 +138,9 @@ export class JLinkServerController extends EventEmitter implements GDBServerCont
     }
 
     public serverArguments(): string[] {
-        const gdbport = this.ports["gdbPort"];
-        const swoport = this.ports["swoPort"];
-        const consoleport = this.ports["consolePort"];
+        const gdbport = this.ports["gdbPort"].remotePort;
+        const swoport = this.ports["swoPort"].remotePort;
+        const consoleport = this.ports["consolePort"].remotePort;
 
         let cmdargs = [
             "-singlerun", // -strict -timeout 0
@@ -194,7 +202,7 @@ export class JLinkServerController extends EventEmitter implements GDBServerCont
                     new SWOConfigureEvent({
                         type: "socket",
                         args: this.args,
-                        port: this.ports[swoPortNm].toString(10),
+                        port: this.ports[swoPortNm].localPort.toString(10),
                     }),
                 );
             } else {

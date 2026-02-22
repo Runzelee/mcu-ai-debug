@@ -4,36 +4,37 @@
  * The SerInstruction is intentionally compact and uses short field names to minimize
  * the size of the JSON response for disassembly requests, which can be quite large.
  */
-export type SerInstruction = { 
-/**
- * Address of the instruction in hexadecimal string format 
- */
-a: string, 
-/**
- * Bytes of the instruction in hexadecimal string format 
- */
-b: string, 
-/**
- * Text representation of the instruction 
- */
-i: string, 
-/**
- * Function ID 
- */
-f: number, 
-/**
- * Offset in function 
- */
-o: number, 
-/**
- * File ID 
- */
-F: number, 
-/**
- * Start line 
- */
-sl: number, 
-/**
- * End line 
- */
-el: number, };
+export type SerInstruction = {
+    /**
+     * Address of the instruction in hexadecimal string format
+     */
+    a: string;
+    /**
+     * Bytes of the instruction in hexadecimal string format
+     */
+    b: string;
+    /**
+     * Text representation of the instruction
+     */
+    i: string;
+    /**
+     * Function ID
+     */
+    f: number;
+    /**
+     * Offset in function
+     */
+    o: number;
+    /**
+     * File ID
+     */
+    F: number;
+    /**
+     * Start line
+     */
+    sl: number;
+    /**
+     * End line
+     */
+    el: number;
+};

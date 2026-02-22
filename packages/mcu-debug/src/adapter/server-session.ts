@@ -11,11 +11,12 @@ import { PEServerController } from "./servers/pemicro";
 import { QEMUServerController } from "./servers/qemu";
 import { ExternalServerController } from "./servers/external";
 import { GDBDebugSession } from "./gdb-session";
-import { createPortName, GDBServerController, GenericCustomEvent, quoteShellCmdLine } from "./servers/common";
+import { createPortName, GDBServerController, GenericCustomEvent, quoteShellCmdLine, TcpPortDef, TcpPortDefMap } from "./servers/common";
 import { GdbEventNames, Stderr } from "./gdb-mi/mi-types";
 import { TcpPortScanner } from "@mcu-debug/shared";
 import path from "path";
 import { greenFormat } from "../frontend/ansi-helpers";
+import { ProxyClient } from "./proxy-client";
 
 const SERVER_TYPE_MAP: { [key: string]: any } = {
     jlink: JLinkServerController,
@@ -33,9 +34,10 @@ export class GDBServerSession extends EventEmitter {
     public serverController: GDBServerController;
     private process: child_process.ChildProcess | null = null;
     private consoleSocket: net.Socket | null = null;
-    public ports: { [name: string]: number } = {};
+    public ports: TcpPortDefMap = {};
     public usingParentServer: boolean = false;
     private clientRequestedStop: boolean = false;
+    private proxyClient: ProxyClient | null = null;
 
     constructor(private session: GDBDebugSession) {
         super();
@@ -63,6 +65,15 @@ export class GDBServerSession extends EventEmitter {
     public async startServer(): Promise<void> {
         if (this.session.args.servertype === "external") {
             return;
+        }
+
+        if (this.session.args.hostConfig) {
+            this.proxyClient = new ProxyClient(this.session, this);
+            try {
+                await this.proxyClient.start();
+            } catch (e: any) {
+                throw new Error(`Failed to connect to proxy server: ${e}`);
+            }
         }
 
         try {
@@ -97,16 +108,36 @@ export class GDBServerSession extends EventEmitter {
             const argsStr = quoteShellCmdLine([executable]) + " " + args.map((a) => quoteShellCmdLine([a])).join(" ") + "\n ";
             this.session.handleMsg(GdbEventNames.Console, `Starting GDB-Server: ${argsStr}`);
             this.consoleSocket?.write(greenFormat(argsStr));
+            const matchRegex = this.serverController.initMatch();
 
-            this.process = child_process.spawn(executable, args, {
-                cwd: serverCwd,
-                env: process.env,
-                detached: true,
-            });
+            if (this.proxyClient) {
+                this.session.handleMsg(Stderr, "Starting gdb-server via proxy...\n");
+                try {
+                    this.proxyClient.on("streamStarted", (data: TcpPortDef) => {
+                        if (data.name.startsWith("gdb")) {
+                            this.session.handleMsg(Stderr, `GDB-Server stream ready on port server ${data.remotePort}\n`);
+                            resolved = true;
+                            resolve();
+                        }
+                    });
+                    this.proxyClient?.on("serverExited", (code: number, signal: NodeJS.Signals) => {
+                        serverExited(code, signal);
+                    });
+                    await this.proxyClient.launchServer(executable, args, serverCwd, matchRegex ? [matchRegex] : []);
+                } catch (e: any) {
+                    reject(new Error(`Failed to launch gdb-server via proxy: ${e.message}`));
+                    return;
+                }
+            } else {
+                this.process = child_process.spawn(executable, args, {
+                    cwd: serverCwd,
+                    env: process.env,
+                    detached: true,
+                });
+            }
 
             this.serverController.serverLaunchStarted();
 
-            const matchRegex = this.serverController.initMatch();
             let timer: NodeJS.Timeout | null = null;
             let timeout: NodeJS.Timeout | null = null;
             let resolved = false;
@@ -121,10 +152,10 @@ export class GDBServerSession extends EventEmitter {
                 }
             };
 
-            if (!matchRegex) {
+            if (!matchRegex && !this.proxyClient) {
                 const timeoutMs = 2000;
                 const serverType = this.session.args.servertype || "openocd";
-                const gdbport = this.ports["gdbPort"];
+                const gdbport = this.ports["gdbPort"]?.localPort;
                 if (gdbport && serverType.toLowerCase() === "qemu") {
                     // We don't care about the result, just wait and bail early if listening
                     await isPortListening(gdbport, timeoutMs);
@@ -161,35 +192,38 @@ export class GDBServerSession extends EventEmitter {
                 );
             }
 
-            const handleOutput = (data: Buffer) => {
-                if (this.consoleSocket && !this.consoleSocket.destroyed) {
-                    this.consoleSocket.write(data);
-                }
+            if (this.process) {
+                const handleOutput = (data: Buffer) => {
+                    this.writeToConsole(data);
 
-                if (matchRegex && !resolved) {
-                    const str = data.toString();
-                    if (matchRegex.test(str)) {
-                        resolved = true;
-                        killTimers();
-                        this.serverController.serverLaunchCompleted();
-                        resolve();
+                    if (matchRegex && !resolved) {
+                        const str = data.toString();
+                        if (matchRegex.test(str)) {
+                            resolved = true;
+                            killTimers();
+                            this.serverController.serverLaunchCompleted();
+                            resolve();
+                        }
                     }
-                }
-            };
+                };
+                this.process.stdout?.on("data", handleOutput);
+                this.process.stderr?.on("data", handleOutput);
 
-            this.process.stdout?.on("data", handleOutput);
-            this.process.stderr?.on("data", handleOutput);
+                this.process.on("error", (err) => {
+                    killTimers();
+                    if (!resolved) {
+                        resolved = true;
+                        timeout && clearTimeout(timeout);
+                        reject(err);
+                    }
+                });
 
-            this.process.on("error", (err) => {
-                killTimers();
-                if (!resolved) {
-                    resolved = true;
-                    timeout && clearTimeout(timeout);
-                    reject(err);
-                }
-            });
+                this.process.on("exit", (code, signal) => {
+                    serverExited(code, signal);
+                });
+            }
 
-            this.process.on("exit", (code, signal) => {
+            const serverExited = (code: number | null, signal: NodeJS.Signals | null) => {
                 killTimers();
                 if (!resolved) {
                     resolved = true;
@@ -202,8 +236,14 @@ export class GDBServerSession extends EventEmitter {
                     this.consoleSocket.destroy();
                     this.consoleSocket = null;
                 }
-            });
+            };
         });
+    }
+
+    public writeToConsole(data: Buffer) {
+        if (this.consoleSocket && !this.consoleSocket.destroyed) {
+            this.consoleSocket.write(data);
+        }
     }
 
     public async stopServer(): Promise<void> {
@@ -214,6 +254,12 @@ export class GDBServerSession extends EventEmitter {
                 this.process.kill();
             }
             this.process = null;
+        } else if (this.proxyClient) {
+            try {
+                await this.proxyClient.stop();
+            } catch (e: any) {
+                this.session.handleMsg(Stderr, `Error stopping gdb-server via proxy: ${e.message}\n`);
+            }
         }
         if (this.consoleSocket) {
             this.consoleSocket.destroy();
@@ -249,7 +295,8 @@ export class GDBServerSession extends EventEmitter {
         for (const pName of this.serverController.portsNeeded) {
             for (let proc = 0; proc < numProcs; proc++) {
                 const nm = createPortName(proc, pName);
-                this.ports[nm] = ports[idx++];
+                this.ports[nm] = new TcpPortDef(nm, ports[idx], ports[idx]);
+                idx++;
             }
         }
         this.session.args.pvtPorts = this.ports;
@@ -260,23 +307,39 @@ export class GDBServerSession extends EventEmitter {
             const startPort = 35000;
             if (useParent) {
                 this.ports = this.session.args.pvtPorts = this.session.args.pvtParent.pvtPorts;
-                this.serverController.setPorts(this.ports);
+                this.serverController.ports = this.ports;
                 if (this.session.args.debugFlags.anyFlags) {
                     this.session.handleMsg(Stderr, JSON.stringify({ configFromParent: this.session.args.pvtMyConfigFromParent }, undefined, 4) + "\n");
                 }
                 return resolve();
             }
             const totalPortsNeeded = this.calculatePortsNeeded();
+            const needConsecutive = this.proxyClient ? false : true; // If using proxy, we don't require consecutive ports as proxy will handle the mapping
             TcpPortScanner.findFreePorts(totalPortsNeeded, {
                 start: startPort,
-                consecutive: true,
+                consecutive: needConsecutive,
             }).then(
                 (ports) => {
                     this.createPortsMap(ports);
-                    this.serverController.setPorts(this.ports);
-                    resolve();
+                    if (this.proxyClient) {
+                        this.proxyClient.allocatePorts(this.ports).then(
+                            (ports: { [key: string]: TcpPortDef }) => {
+                                this.ports = ports;
+                                this.serverController.ports = ports;
+                                this.session.handleMsg(Stderr, `Allocated TCP ports for gdb-server via proxy: ${JSON.stringify(ports)}\n`);
+                                resolve();
+                            },
+                            (e: any) => {
+                                reject(e);
+                            },
+                        );
+                    } else {
+                        this.serverController.ports = this.ports;
+                        this.session.handleMsg(Stderr, `Allocated TCP ports for gdb-server: ${JSON.stringify(this.ports)}\n`);
+                        resolve();
+                    }
                 },
-                (e) => {
+                (e: any) => {
                     reject(e);
                 },
             );

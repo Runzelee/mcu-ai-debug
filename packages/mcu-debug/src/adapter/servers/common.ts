@@ -299,6 +299,15 @@ export interface HostConfig {
     pvtSshTunnelLocalPort?: number; // Local port of the SSH -L tunnel (ssh type only)
 }
 
+export class TcpPortDef {
+    constructor(
+        public name: string,
+        public localPort: number,
+        public remotePort: number,
+    ) {}
+}
+
+export type TcpPortDefMap = { [name: string]: TcpPortDef };
 export interface ConfigurationArguments extends DebugProtocol.LaunchRequestArguments {
     name: string;
     request: string;
@@ -360,7 +369,7 @@ export interface ConfigurationArguments extends DebugProtocol.LaunchRequestArgum
     hardwareBreakpoints: HWBreakpointInfo;
     hardwareWatchpoints: HWWatchpointInfo;
     pvtSessionMode: SessionMode;
-    pvtPorts: { [name: string]: number };
+    pvtPorts: TcpPortDefMap;
     pvtParent: ConfigurationArguments;
     pvtMyConfigFromParent: ChainedConfig; // My configuration coming from the parent
     pvtAvoidPorts: number[];
@@ -430,8 +439,8 @@ export enum GDBInterruptMode {
 export interface GDBServerController extends EventEmitter {
     portsNeeded: string[];
     name: string;
+    ports: { [name: string]: TcpPortDef };
 
-    setPorts(ports: { [name: string]: number }): void;
     setArguments(args: ConfigurationArguments): void;
 
     customRequest(command: string, response: DebugProtocol.Response, args: any): boolean;

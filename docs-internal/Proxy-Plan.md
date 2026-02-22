@@ -308,7 +308,7 @@ Single TCP connection between DA and Proxy. Binary framing:
 | Payload Length | 4 bytes | UInt32 little-endian                                         |
 | Payload        | N bytes | JSON string (control) or raw bytes (data streams)            |
 
-Control channel (Stream ID 0) uses JSON-RPC 2.0 for: `initialize`, `allocatePorts`, `stageFiles`, `launchServer`, `killServer`, `heartbeat`, `streamStatus`.
+Control channel (Stream ID 0) uses JSON-RPC 2.0 for: `initialize`, `allocatePorts`, `stageFiles`, `launchServer`, `endSession`, `heartbeat`, `streamStatus`.
 
 Data channels (Stream IDs 1+) carry raw bytes with zero interpretation — the DA and gdb-server speak their own protocols through the tube.
 
@@ -320,7 +320,7 @@ See `ARCHITECTURE.md` for full packet format details and fragmentation handling.
 
 ### Phase 1 — Funnel Protocol in Rust (local only)
 - `mcu-debug-helper proxy` subcommand with the 5-byte frame parser
-- JSON-RPC control channel: `initialize`, `allocatePorts`, `launchServer`, `killServer`, `heartbeat`
+- JSON-RPC control channel: `initialize`, `allocatePorts`, `launchServer`, `endSession`, `heartbeat`
 - Binary stream forwarding for GDB channel
 - Test: DA ↔ Proxy on `127.0.0.1`, `type: "local"`, no SSH
 

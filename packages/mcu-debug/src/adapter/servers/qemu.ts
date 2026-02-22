@@ -1,5 +1,5 @@
 import { DebugProtocol } from "@vscode/debugprotocol";
-import { GDBServerController, ConfigurationArguments, createPortName } from "./common";
+import { GDBServerController, ConfigurationArguments, createPortName, TcpPortDef, TcpPortDefMap } from "./common";
 import * as os from "os";
 import { EventEmitter } from "events";
 import { commandExists } from "@mcu-debug/shared";
@@ -10,14 +10,10 @@ export class QEMUServerController extends EventEmitter implements GDBServerContr
     public name = "QEMU";
 
     private args = {} as ConfigurationArguments;
-    private ports: { [name: string]: number } = {};
+    public ports: TcpPortDefMap = {};
 
     constructor() {
         super();
-    }
-
-    public setPorts(ports: { [name: string]: number }): void {
-        this.ports = ports;
     }
 
     public setArguments(args: ConfigurationArguments): void {
@@ -29,7 +25,7 @@ export class QEMUServerController extends EventEmitter implements GDBServerContr
     }
 
     public connectCommands(): string[] {
-        const gdbport = this.ports[createPortName(this.args.targetProcessor)];
+        const gdbport = this.ports[createPortName(this.args.targetProcessor)].localPort;
 
         return [`target-select extended-remote localhost:${gdbport}`];
     }
@@ -71,7 +67,7 @@ export class QEMUServerController extends EventEmitter implements GDBServerContr
     }
 
     public serverArguments(): string[] {
-        const gdbport = this.ports["gdbPort"];
+        const gdbport = this.ports["gdbPort"].remotePort;
 
         let cmdargs = [
             "-cpu",

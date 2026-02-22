@@ -1,5 +1,5 @@
 import { DebugProtocol } from "@vscode/debugprotocol";
-import { GDBServerController, ConfigurationArguments, SWOConfigureEvent, createPortName, genDownloadCommands, getGDBSWOInitCommands } from "./common";
+import { GDBServerController, ConfigurationArguments, SWOConfigureEvent, createPortName, genDownloadCommands, getGDBSWOInitCommands, TcpPortDef, TcpPortDefMap } from "./common";
 import * as os from "os";
 import { EventEmitter } from "events";
 
@@ -8,16 +8,11 @@ export class STUtilServerController extends EventEmitter implements GDBServerCon
     public readonly portsNeeded: string[] = ["gdbPort"];
 
     private args = {} as ConfigurationArguments;
-    private ports: { [name: string]: number } = {};
+    public ports: TcpPortDefMap = {};
 
     constructor() {
         super();
     }
-
-    public setPorts(ports: { [name: string]: number }): void {
-        this.ports = ports;
-    }
-
     public setArguments(args: ConfigurationArguments): void {
         this.args = args;
     }
@@ -27,7 +22,7 @@ export class STUtilServerController extends EventEmitter implements GDBServerCon
     }
 
     public connectCommands(): string[] {
-        const gdbport = this.ports[createPortName(this.args.targetProcessor)];
+        const gdbport = this.ports[createPortName(this.args.targetProcessor)].localPort;
 
         return [`target-select extended-remote localhost:${gdbport}`];
     }
@@ -73,7 +68,7 @@ export class STUtilServerController extends EventEmitter implements GDBServerCon
     }
 
     public serverArguments(): string[] {
-        const gdbport = this.ports["gdbPort"];
+        const gdbport = this.ports["gdbPort"].remotePort;
 
         let serverargs = ["-p", gdbport.toString(), "--no-reset"];
         if (this.args.v1) {

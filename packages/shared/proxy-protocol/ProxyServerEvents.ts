@@ -4,4 +4,8 @@
  * Responses are different from events as they represent the result of a request, while events are
  * notifications from the server
  * */
-export type ProxyServerEvents = { "event": "GdbServerLaunched", "params": { pid: number, port: number, } } | { "event": "GdbServerExited", "params": { pid: number, exit_code: number, } } | { "event": "StreamStarted", "params": { stream_id: number, port: number, } } | { "event": "StreamClosed", "params": { stream_id: number, } };
+export type ProxyServerEvents =
+    | { event: "gdbServerLaunched"; params: { pid: number; port: number } }
+    | { event: "gdbServerExited"; params: { pid: number; exit_code: number } }
+    | { event: "streamStarted"; params: { stream_id: number; port: number } }
+    | { event: "streamClosed"; params: { stream_id: number } };

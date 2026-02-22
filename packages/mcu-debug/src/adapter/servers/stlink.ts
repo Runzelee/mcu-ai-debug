@@ -1,5 +1,5 @@
 import { DebugProtocol } from "@vscode/debugprotocol";
-import { GDBServerController, ConfigurationArguments, SWOConfigureEvent, createPortName, genDownloadCommands, getGDBSWOInitCommands } from "./common";
+import { GDBServerController, ConfigurationArguments, SWOConfigureEvent, createPortName, genDownloadCommands, getGDBSWOInitCommands, TcpPortDef, TcpPortDefMap } from "./common";
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
@@ -97,7 +97,7 @@ export class STLinkServerController extends EventEmitter implements GDBServerCon
     public readonly ST_DIR = get_ST_DIR();
     public readonly ST_CLT_ISTALL_DIR = get_CLT_INSTALL_DIR();
     private args = {} as ConfigurationArguments;
-    private ports: { [name: string]: number } = {};
+    public ports: TcpPortDefMap = {};
     private targetProcessor: number = 0;
 
     public getSTMCubeIdeDir(): string {
@@ -126,10 +126,6 @@ export class STLinkServerController extends EventEmitter implements GDBServerCon
         super();
     }
 
-    public setPorts(ports: { [name: string]: number }): void {
-        this.ports = ports;
-    }
-
     public setArguments(args: ConfigurationArguments): void {
         // With STLink, there isn't a concept of debugging multiple processors with one instance of the server like openocd
         // It is more like JLink. But, we do have to pass on command line which processor we want to debug
@@ -147,7 +143,7 @@ export class STLinkServerController extends EventEmitter implements GDBServerCon
     }
 
     public connectCommands(): string[] {
-        const gdbport = this.ports[createPortName(this.args.targetProcessor)];
+        const gdbport = this.ports[createPortName(this.args.targetProcessor)].localPort;
         return [`target-select extended-remote localhost:${gdbport}`];
     }
 
@@ -207,7 +203,7 @@ export class STLinkServerController extends EventEmitter implements GDBServerCon
     }
 
     public serverArguments(): string[] {
-        const gdbport = this.ports["gdbPort"];
+        const gdbport = this.ports["gdbPort"].remotePort;
 
         let serverargs = ["-p", gdbport.toString()];
 
@@ -244,7 +240,7 @@ export class STLinkServerController extends EventEmitter implements GDBServerCon
         }
 
         if (this.args.swoConfig.enabled) {
-            const swoport = this.ports["swoPort"];
+            const swoport = this.ports["swoPort"].remotePort;
             serverargs.push("--swo-port", swoport.toString());
 
             const { cpuFrequency, swoFrequency } = this.args.swoConfig;
@@ -285,7 +281,7 @@ export class STLinkServerController extends EventEmitter implements GDBServerCon
                 new SWOConfigureEvent({
                     type: "socket",
                     args: this.args,
-                    port: this.ports["swoPort"].toString(),
+                    port: this.ports["swoPort"].localPort.toString(),
                 }),
             );
         }

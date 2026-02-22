@@ -1,5 +1,5 @@
 import { DebugProtocol } from "@vscode/debugprotocol";
-import { GDBServerController, ConfigurationArguments, createPortName, SWOConfigureEvent, genDownloadCommands } from "./common";
+import { GDBServerController, ConfigurationArguments, createPortName, SWOConfigureEvent, genDownloadCommands, TcpPortDef, TcpPortDefMap } from "./common";
 import * as os from "os";
 import { EventEmitter } from "events";
 
@@ -7,15 +7,11 @@ export class PEServerController extends EventEmitter implements GDBServerControl
     public portsNeeded: string[] = ["gdbPort", "swoPort", "consolePort"];
     public name = "PE";
 
-    private ports: { [name: string]: number } = {};
+    public ports: TcpPortDefMap = {};
     private args = {} as ConfigurationArguments;
 
     constructor() {
         super();
-    }
-
-    public setPorts(ports: { [name: string]: number }): void {
-        this.ports = ports;
     }
 
     public setArguments(args: ConfigurationArguments): void {
@@ -27,7 +23,7 @@ export class PEServerController extends EventEmitter implements GDBServerControl
     }
 
     public connectCommands(): string[] {
-        const gdbport = this.ports[createPortName(this.args.targetProcessor)];
+        const gdbport = this.ports[createPortName(this.args.targetProcessor)].localPort;
 
         return [`target-select extended-remote localhost:${gdbport}`];
     }
@@ -71,7 +67,7 @@ export class PEServerController extends EventEmitter implements GDBServerControl
     }
 
     public serverArguments(): string[] {
-        const gdbport = this.ports["gdbPort"];
+        const gdbport = this.ports["gdbPort"].remotePort;
 
         let serverargs: string[] = [];
 
@@ -100,7 +96,7 @@ export class PEServerController extends EventEmitter implements GDBServerControl
         if (this.args.swoConfig.enabled) {
             const source = this.args.swoConfig.source;
             if (source === "socket") {
-                const swoPort = this.ports[createPortName(this.args.targetProcessor, "swoPort")];
+                const swoPort = this.ports[createPortName(this.args.targetProcessor, "swoPort")].remotePort;
                 serverargs.push(`-streamingport=${swoPort}`);
             }
         }
@@ -129,7 +125,7 @@ export class PEServerController extends EventEmitter implements GDBServerControl
                     new SWOConfigureEvent({
                         type: "socket",
                         args: this.args,
-                        port: this.ports[swoPortNm].toString(10),
+                        port: this.ports[swoPortNm].localPort.toString(10),
                     }),
                 );
             }

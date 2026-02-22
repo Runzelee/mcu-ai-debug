@@ -5,24 +5,25 @@
  * the DAP DisassembleArguments and should be kept in sync with it. The main difference is that we represent
  * the memoryReference as a hex string, and we use i32 for offsets and counts to allow negative values.
  */
-export type DisassembleArguments = { 
-/**
- * Memory reference to the base location containing the instructions to disassemble. 
- */
-memoryReference: string, 
-/**
- * Offset (in bytes) to be applied to the reference location before disassembling. Can be negative. 
- */
-offset: number | null, 
-/**
- * Offset (in instructions) to be applied after the byte offset (if any) before disassembling. Can be negative. 
- */
-instructionOffset: number | null, 
-/** Number of instructions to disassemble starting at the specified location and offset.
+export type DisassembleArguments = {
+    /**
+     * Memory reference to the base location containing the instructions to disassemble.
+     */
+    memoryReference: string;
+    /**
+     * Offset (in bytes) to be applied to the reference location before disassembling. Can be negative.
+     */
+    offset: number | null;
+    /**
+     * Offset (in instructions) to be applied after the byte offset (if any) before disassembling. Can be negative.
+     */
+    instructionOffset: number | null;
+    /** Number of instructions to disassemble starting at the specified location and offset.
         An adapter must return exactly this number of instructions - any unavailable instructions should be replaced with an implementation-defined 'invalid instruction' value.
     */
-instructionCount: number, 
-/**
- * If true, the adapter should attempt to resolve memory addresses and other values to symbolic names. 
- */
-resolveSymbols: boolean | null, };
+    instructionCount: number;
+    /**
+     * If true, the adapter should attempt to resolve memory addresses and other values to symbolic names.
+     */
+    resolveSymbols: boolean | null;
+};

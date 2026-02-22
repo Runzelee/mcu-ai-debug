@@ -1,5 +1,17 @@
 import { DebugProtocol } from "@vscode/debugprotocol";
-import { GDBServerController, ConfigurationArguments, SWOConfigureEvent, createPortName, RTTServerHelper, genDownloadCommands, CTIAction, getGDBSWOInitCommands, SessionMode } from "./common";
+import {
+    GDBServerController,
+    ConfigurationArguments,
+    SWOConfigureEvent,
+    createPortName,
+    RTTServerHelper,
+    genDownloadCommands,
+    CTIAction,
+    getGDBSWOInitCommands,
+    SessionMode,
+    TcpPortDef,
+    TcpPortDefMap,
+} from "./common";
 import * as os from "os";
 import * as fs from "fs";
 import * as net from "net";
@@ -50,17 +62,12 @@ export class OpenOCDServerController extends EventEmitter implements GDBServerCo
     public portsNeeded = ["gdbPort", "tclPort", "telnetPort", "swoPort"];
     public name = "OpenOCD";
     private args = {} as ConfigurationArguments;
-    private ports: { [name: string]: number } = {};
+    public ports: TcpPortDefMap = {};
     private rttHelper: RTTServerHelper = new RTTServerHelper();
 
     constructor() {
         super();
     }
-
-    public setPorts(ports: { [name: string]: number }): void {
-        this.ports = ports;
-    }
-
     public setArguments(args: ConfigurationArguments): void {
         this.args = args;
         if (args.pvtOpenOCDDebug) {
@@ -73,7 +80,7 @@ export class OpenOCDServerController extends EventEmitter implements GDBServerCo
     }
 
     public connectCommands(): string[] {
-        const gdbport = this.ports[createPortName(this.args.targetProcessor)];
+        const gdbport = this.ports[createPortName(this.args.targetProcessor)].localPort;
 
         return [`target-select extended-remote localhost:${gdbport}`];
     }
@@ -168,7 +175,8 @@ export class OpenOCDServerController extends EventEmitter implements GDBServerCo
             const swoFrequency = this.args.swoConfig.swoFrequency;
             const cpuFrequency = this.args.swoConfig.cpuFrequency;
             const source = this.args.swoConfig.source;
-            const swoOutput = source === "serial" ? "external" : ":" + this.ports[createPortName(this.args.targetProcessor, "swoPort")];
+            const swoPortNum = this.ports[createPortName(this.args.targetProcessor, "swoPort")].remotePort;
+            const swoOutput = source === "serial" ? "external" : ":" + swoPortNum;
             commands.push(`monitor CDSWOConfigure ${cpuFrequency} ${swoFrequency} ${swoOutput}`);
         }
 
@@ -202,9 +210,9 @@ export class OpenOCDServerController extends EventEmitter implements GDBServerCo
 
         // Regardless of the target processor, we will only supply the processor '0's port#
         // OpenOcd will increment and assign the right port-numer to the right processor
-        serverargs.push("-c", `gdb_port ${this.ports["gdbPort"]}`);
-        serverargs.push("-c", `tcl_port ${this.ports["tclPort"]}`);
-        serverargs.push("-c", `telnet_port ${this.ports["telnetPort"]}`);
+        serverargs.push("-c", `gdb_port ${this.ports["gdbPort"].remotePort}`);
+        serverargs.push("-c", `tcl_port ${this.ports["tclPort"].remotePort}`);
+        serverargs.push("-c", `telnet_port ${this.ports["telnetPort"].remotePort}`);
 
         this.args.searchDir.forEach((cs, idx) => {
             serverargs.push("-s", cs);
@@ -270,7 +278,7 @@ export class OpenOCDServerController extends EventEmitter implements GDBServerCo
                     new SWOConfigureEvent({
                         type: "socket",
                         args: this.args,
-                        port: this.ports[swoPortNm].toString(10),
+                        port: this.ports[swoPortNm].localPort.toString(10),
                     }),
                 );
             } else if (source === "serial") {
@@ -416,7 +424,7 @@ export class OpenOCDServerController extends EventEmitter implements GDBServerCo
         return new Promise<void>((resolve, reject) => {
             if (this.tclSocket === undefined) {
                 const tclPortName = createPortName(0, "tclPort");
-                const tclPortNum = this.ports[tclPortName];
+                const tclPortNum = this.ports[tclPortName].localPort;
                 const obj = {
                     host: "127.0.0.1",
                     port: tclPortNum,

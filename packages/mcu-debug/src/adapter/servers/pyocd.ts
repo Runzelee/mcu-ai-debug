@@ -1,5 +1,5 @@
 import { DebugProtocol } from "@vscode/debugprotocol";
-import { ConfigurationArguments, GDBServerController, SWOConfigureEvent, createPortName, genDownloadCommands, getGDBSWOInitCommands } from "./common";
+import { ConfigurationArguments, GDBServerController, SWOConfigureEvent, TcpPortDef, TcpPortDefMap, createPortName, genDownloadCommands, getGDBSWOInitCommands } from "./common";
 import { EventEmitter } from "events";
 
 export class PyOCDServerController extends EventEmitter implements GDBServerController {
@@ -7,14 +7,10 @@ export class PyOCDServerController extends EventEmitter implements GDBServerCont
     public readonly portsNeeded: string[] = ["gdbPort", "consolePort", "swoPort"];
 
     private args = {} as ConfigurationArguments;
-    private ports: { [name: string]: number } = {};
+    public ports: TcpPortDefMap = {};
 
     constructor() {
         super();
-    }
-
-    public setPorts(ports: { [name: string]: number }): void {
-        this.ports = ports;
     }
 
     public setArguments(args: ConfigurationArguments): void {
@@ -26,7 +22,7 @@ export class PyOCDServerController extends EventEmitter implements GDBServerCont
     }
 
     public connectCommands(): string[] {
-        const gdbport = this.ports[createPortName(this.args.targetProcessor)];
+        const gdbport = this.ports[createPortName(this.args.targetProcessor)].localPort;
 
         return [
             `target-select extended-remote localhost:${gdbport}`,
@@ -76,8 +72,8 @@ export class PyOCDServerController extends EventEmitter implements GDBServerCont
     }
 
     public serverArguments(): string[] {
-        const gdbport = this.ports["gdbPort"];
-        const telnetport = this.ports["consolePort"];
+        const gdbport = this.ports["gdbPort"].remotePort;
+        const telnetport = this.ports["consolePort"].remotePort;
 
         let serverargs = ["gdbserver", "--port", gdbport.toString(), "--telnet-port", telnetport.toString()];
 
@@ -99,7 +95,7 @@ export class PyOCDServerController extends EventEmitter implements GDBServerCont
         if (this.args.swoConfig.enabled) {
             const source = this.args.swoConfig.source;
             if (source === "probe" || source === "socket" || source === "file") {
-                const swoPort = this.ports[createPortName(this.args.targetProcessor, "swoPort")];
+                const swoPort = this.ports[createPortName(this.args.targetProcessor, "swoPort")].remotePort;
                 const cpuF = this.args.swoConfig.cpuFrequency;
                 const swoF = this.args.swoConfig.swoFrequency || "1";
                 const args = ["-O", "enable_swv=1", "-O", "swv_raw_enable=true", "-O", `swv_raw_port=${swoPort}`, "-O", `swv_system_clock=${cpuF}`, "-O", `swv_clock=${swoF}`];
@@ -128,7 +124,7 @@ export class PyOCDServerController extends EventEmitter implements GDBServerCont
                     new SWOConfigureEvent({
                         type: "socket",
                         args: this.args,
-                        port: this.ports[swoPortNm].toString(10),
+                        port: this.ports[swoPortNm].localPort.toString(10),
                     }),
                 );
             } else if (source === "serial") {

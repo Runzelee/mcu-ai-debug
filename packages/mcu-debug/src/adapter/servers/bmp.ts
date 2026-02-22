@@ -1,21 +1,17 @@
 import { DebugProtocol } from "@vscode/debugprotocol";
-import { ConfigurationArguments, GDBServerController, SWOConfigureEvent, genDownloadCommands, getGDBSWOInitCommands } from "./common";
+import { ConfigurationArguments, GDBServerController, SWOConfigureEvent, TcpPortDef, TcpPortDefMap, genDownloadCommands, getGDBSWOInitCommands } from "./common";
 import * as os from "os";
 import { EventEmitter } from "events";
 
 export class BMPServerController extends EventEmitter implements GDBServerController {
     public readonly name: string = "BMP";
     public readonly portsNeeded: string[] = [];
+    public ports: TcpPortDefMap = {};
 
     private args = {} as ConfigurationArguments;
-    private ports: { [name: string]: number } = {};
 
     constructor() {
         super();
-    }
-
-    public setPorts(ports: { [name: string]: number }): void {
-        this.ports = ports;
     }
 
     public setArguments(args: ConfigurationArguments): void {

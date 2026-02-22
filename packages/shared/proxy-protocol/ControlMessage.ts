@@ -2,7 +2,7 @@
 import type { JsonValue } from "./JsonValue";
 import type { PortAllocatorSpec } from "./PortAllocatorSpec";
 
-export type ControlRequest =
+export type ControlMessage = { seq: number } & (
     | {
           method: "initialize";
           params: {
@@ -52,4 +52,5 @@ export type ControlRequest =
       }
     | { method: "endSession" }
     | { method: "streamStatus"; params: { stream_id: number } }
-    | { method: "heartbeat" };
+    | { method: "heartbeat" }
+);

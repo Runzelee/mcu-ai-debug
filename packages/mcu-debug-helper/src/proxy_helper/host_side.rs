@@ -12,7 +12,7 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 use std::process::Child;
 use std::process::Command;
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -29,58 +29,65 @@ pub fn send_to_stream(stream_id: u8, stream: &mut TcpStream, bytes: &[u8]) -> io
     header.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     stream.write_all(&header)?;
     stream.write_all(bytes)?;
+    stream.flush()?;
     Ok(())
 }
 
-fn read_and_forward<R: Read>(stream_id: u8, mut reader: R, tx: Sender<StreamData>) {
+fn read_and_forward<R: Read>(stream_id: u8, mut reader: R, tx: Sender<ProxyEvent>) {
     let mut buffer = [0; 4096]; // Larger buffer for performance
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => {
                 // EOF
-                tx.send(StreamData::Closed { stream_id }).ok();
+                tx.send(ProxyEvent::StreamClosed { stream_id }).ok();
                 break;
             }
             Ok(n) => {
                 let data = buffer[..n].to_vec();
-                if tx.send(StreamData::Data { stream_id, data }).is_err() {
+                if tx.send(ProxyEvent::StreamData { stream_id, data }).is_err() {
                     break; // Main thread died
                 }
             }
             Err(_) => {
-                tx.send(StreamData::Closed { stream_id }).ok();
+                tx.send(ProxyEvent::StreamClosed { stream_id }).ok();
                 break;
             }
         }
     }
 }
 
-// Message from reader threads to main
-enum StreamData {
-    Data { stream_id: u8, data: Vec<u8> },
-    Closed { stream_id: u8 },
-}
-
-// Message sent from connection threads to main
-enum PortEvent {
-    Connected {
+// Unified event type for the main event loop. All background threads (control-stream
+// reader, port waiters, stdout/stderr forwarders) send events through one channel so
+// message_loop can block on recv() instead of polling + sleeping.
+enum ProxyEvent {
+    /// Raw bytes received from the client TCP connection.
+    IncomingData(Vec<u8>),
+    /// Client connection closed (EOF or error).
+    IncomingClosed,
+    /// A port waiter successfully connected to the gdb-server port.
+    PortConnected {
         stream_id: u8,
         port: u16,
         stream: TcpStream,
     },
-    Failed {
+    /// A port waiter failed to connect.
+    PortFailed {
         stream_id: u8,
         port: u16,
         error: String,
     },
+    /// Data received from a forwarded stream (stdout, stderr, GDB RSP, …).
+    StreamData { stream_id: u8, data: Vec<u8> },
+    /// A forwarded stream closed.
+    StreamClosed { stream_id: u8 },
 }
 
 #[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
-#[ts(type = "any")]
+#[ts(type = "any", export, export_to = "proxy-protocol/")]
 pub struct JsonValue(pub Value);
 
 #[derive(Debug, Serialize, Deserialize, Hash, Eq, PartialEq, ts_rs::TS)]
-#[ts(type = "any")]
+#[ts(type = "any", export, export_to = "proxy-protocol/")]
 #[repr(u8)]
 pub enum StreamId {
     Control = 0, // Control stream for JSON-RPC messages (e.g. initialize, startStream, streamStatus, heartbeat). This is created on connection and always available.
@@ -143,11 +150,13 @@ pub enum ControlRequest {
         version: String,
     },
 
+    #[serde(rename = "allocatePorts")]
     AllocatePorts {
         /** Number of consecutive ports needed */
         ports_spec: PortAllocatorSpec,
     },
 
+    #[serde(rename = "startGdbServer")]
     StartGdbServer {
         /** Launch configuration arguments */
         config_args: JsonValue,
@@ -160,6 +169,9 @@ pub enum ControlRequest {
         /** Required: Regex patterns to identify the gdb-server process from its output (e.g. "Listening on port (\d+)"), used for auto-detecting the port if not specified in server_args */
         server_regexes: Vec<String>,
     },
+
+    #[serde(rename = "endSession")]
+    EndSession,
 
     /** Get the status of a stream */
     #[serde(rename = "streamStatus")]
@@ -195,14 +207,19 @@ pub struct ControlResponse {
 #[ts(export, export_to = "proxy-protocol/")]
 pub enum ControlResponseData {
     /** Initialize response: Just a version string */
+    #[serde(rename = "initialize")]
     Initialize { version: String },
     /** AllocatePorts response: List of reserved ports. This is a flat list in the same order as what was requested */
+    #[serde(rename = "allocatePorts")]
     AllocatePorts { ports: Vec<PortReserved> },
     /** StartGdbServer response: PID of the launched GDB server */
+    #[serde(rename = "startGdbServer")]
     StartGdbServer { pid: u32 },
     /** StreamStatus response: Status of a specific stream */
+    #[serde(rename = "streamStatus")]
     StreamStatus { stream_id: u8, status: String },
     /** Heartbeat response: Acknowledgment of heartbeat */
+    #[serde(rename = "heartbeat")]
     Heartbeat,
 }
 
@@ -240,9 +257,17 @@ impl ControlResponse {
 #[ts(export, export_to = "proxy-protocol/")]
 #[serde(tag = "event", content = "params")]
 pub enum ProxyServerEvents {
+    /** GDB server has been launched */
+    #[serde(rename = "gdbServerLaunched")]
     GdbServerLaunched { pid: u32, port: u16 },
+    /** GDB server has exited */
+    #[serde(rename = "gdbServerExited")]
     GdbServerExited { pid: u32, exit_code: i32 },
+    /** Stream has started */
+    #[serde(rename = "streamStarted")]
     StreamStarted { stream_id: u8, port: u16 },
+    /** Stream has closed */
+    #[serde(rename = "streamClosed")]
     StreamClosed { stream_id: u8 },
 }
 
@@ -278,17 +303,15 @@ pub struct ProxyServer {
     // We reserve/allocate these ports and wait until the gdb-server is launched
     reserved_ports: Vec<PortInfoListner>,
 
-    // Channel receivers and senders for communication with spawned threads
-    port_events_rx: Receiver<PortEvent>,
-    port_events_tx: Sender<PortEvent>,
-    stream_data_rx: Receiver<StreamData>,
-    stream_data_tx: Sender<StreamData>,
+    // Unified event channel: every background thread (control-stream reader,
+    // port waiters, stdout/stderr forwarders) sends ProxyEvent here.
+    event_rx: Receiver<ProxyEvent>,
+    event_tx: Sender<ProxyEvent>,
 }
 
 impl ProxyServer {
     pub fn new(args: ProxyArgs, stream: TcpStream) -> Self {
-        let (port_events_tx, port_events_rx) = channel();
-        let (stream_data_tx, stream_data_rx) = channel();
+        let (event_tx, event_rx) = channel();
 
         Self {
             args,
@@ -297,134 +320,151 @@ impl ProxyServer {
             streams: HashMap::new(),
             exit: false,
             reserved_ports: Vec::new(),
-            port_events_rx,
-            port_events_tx,
-            stream_data_rx,
-            stream_data_tx,
+            event_rx,
+            event_tx,
             next_stream_id: 3,
         }
     }
 
-    pub fn check_port_events(&mut self) {
-        // Check for port connection events (non-blocking)
-        match self.port_events_rx.try_recv() {
-            Ok(PortEvent::Connected {
-                stream_id,
-                port,
-                stream,
-            }) => {
-                eprintln!("Port {} (stream {}) connected!", port, stream_id);
-                self.streams.get_mut(&stream_id).and_then(|pinfo| {
-                    pinfo.stream = Some(stream);
-                    Some(())
-                });
-                let event = ProxyServerEvents::StreamStarted { stream_id, port };
-                let _ = event.send(&mut self.stream);
-                // Send event to client
+    pub fn message_loop(&mut self) -> Result<()> {
+        // Spawn a dedicated reader thread for the client connection so that the event
+        // loop can block on event_rx.recv() and wake up instantly for *any* event
+        // (incoming data, port connection, forwarded stream data) without ever blocking
+        // on a stream read in the main thread.
+        let control_stream = self.stream.try_clone()?;
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let mut reader = control_stream;
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        event_tx.send(ProxyEvent::IncomingClosed).ok();
+                        break;
+                    }
+                    Ok(n) => {
+                        if event_tx
+                            .send(ProxyEvent::IncomingData(buf[..n].to_vec()))
+                            .is_err()
+                        {
+                            break; // main thread exited
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Control stream read error: {}", e);
+                        event_tx.send(ProxyEvent::IncomingClosed).ok();
+                        break;
+                    }
+                }
             }
-            Ok(PortEvent::Failed {
-                stream_id,
-                port,
-                error,
-            }) => {
-                eprintln!("Port {} failed: {} for stream {}", port, error, stream_id);
-                // Handle failure, maybe retry or notify client
-            }
-            Err(TryRecvError::Empty) => {
-                // No events yet, continue
-            }
-            Err(TryRecvError::Disconnected) => {
-                // All senders dropped - this shouldn't happen during normal operation
-                eprintln!("Warning: port_events channel disconnected");
-            }
-        }
-    }
+        });
 
-    fn check_stream_data(&mut self) {
-        while let Ok(data) = self.stream_data_rx.try_recv() {
-            match data {
-                StreamData::Data { stream_id, data } => {
-                    // Forward to client
+        let mut content_length: Option<u32> = None;
+        let mut stream_id = 0u8;
+        let mut all_bytes = Vec::new();
+
+        loop {
+            let event = match self.event_rx.recv() {
+                Ok(e) => e,
+                Err(_) => break, // all senders dropped
+            };
+            match event {
+                ProxyEvent::IncomingClosed => {
+                    eprintln!("Client connection closed");
+                    break;
+                }
+                ProxyEvent::IncomingData(bytes) => {
+                    all_bytes.extend_from_slice(&bytes);
+                    while !all_bytes.is_empty() {
+                        if content_length.is_none() {
+                            if all_bytes.len() >= 5 {
+                                stream_id = all_bytes[0];
+                                content_length =
+                                    Some(u32::from_le_bytes(all_bytes[1..5].try_into().unwrap()));
+                                all_bytes.drain(..5);
+                            } else {
+                                break; // wait for more bytes
+                            }
+                        } else if content_length.unwrap() as usize <= all_bytes.len() {
+                            let msg_len = content_length.unwrap() as usize;
+                            let msg = all_bytes[..msg_len].to_vec();
+                            if stream_id == 0 {
+                                // Control message (JSON)
+                                let msg_str = String::from_utf8_lossy(&msg);
+                                match serde_json::from_str::<ControlMessage>(&msg_str) {
+                                    Ok(control_msg) => {
+                                        self.handle_control_message(control_msg);
+                                        if self.exit {
+                                            eprintln!("Exiting message loop as requested by control message");
+                                            return Ok(());
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Failed to parse control message: {}", e);
+                                    }
+                                }
+                            } else {
+                                // Forward to the appropriate connected stream
+                                match self.streams.get_mut(&stream_id) {
+                                    Some(pinfo) => {
+                                        if let Some(stream) = &mut pinfo.stream {
+                                            if let Err(e) = stream.write_all(&msg) {
+                                                eprintln!(
+                                                    "Stream {} write failed: {}",
+                                                    stream_id, e
+                                                );
+                                                // TODO: remove the stream, notify the DA
+                                            }
+                                        } else {
+                                            eprintln!(
+                                                "Stream {} is not currently connected",
+                                                stream_id
+                                            );
+                                        }
+                                    }
+                                    None => {
+                                        eprintln!(
+                                            "Received message for unknown stream ID: {}",
+                                            stream_id
+                                        );
+                                    }
+                                }
+                            }
+                            all_bytes.drain(..msg_len);
+                            content_length = None;
+                        } else {
+                            break; // wait for the rest of the message
+                        }
+                    }
+                }
+                ProxyEvent::PortConnected {
+                    stream_id,
+                    port,
+                    stream,
+                } => {
+                    eprintln!("Port {} (stream {}) connected!", port, stream_id);
+                    if let Some(pinfo) = self.streams.get_mut(&stream_id) {
+                        pinfo.stream = Some(stream);
+                    }
+                    let event = ProxyServerEvents::StreamStarted { stream_id, port };
+                    let _ = event.send(&mut self.stream);
+                }
+                ProxyEvent::PortFailed {
+                    stream_id,
+                    port,
+                    error,
+                } => {
+                    eprintln!("Port {} failed: {} for stream {}", port, error, stream_id);
+                    // Handle failure, maybe retry or notify client
+                }
+                ProxyEvent::StreamData { stream_id, data } => {
                     send_to_stream(stream_id, &mut self.stream, &data).ok();
                 }
-                StreamData::Closed { stream_id } => {
+                ProxyEvent::StreamClosed { stream_id } => {
                     eprintln!("Stream {} closed", stream_id);
                     self.streams.remove(&stream_id);
                     let event = ProxyServerEvents::StreamClosed { stream_id };
                     let _ = event.send(&mut self.stream);
-                }
-            }
-        }
-    }
-
-    pub fn message_loop(&mut self) -> Result<()> {
-        let mut buffer = [0; 512];
-        let mut content_length: Option<u32> = None;
-        let mut stream_id = 0;
-        let mut all_bytes = Vec::new();
-        loop {
-            self.check_port_events();
-            self.check_stream_data();
-
-            // Read data into the buffer
-            let bytes_read = self.stream.read(&mut buffer)?;
-
-            if bytes_read == 0 {
-                // Connection closed
-                break;
-            }
-            all_bytes.extend_from_slice(&buffer[..bytes_read]);
-            while all_bytes.len() > 0 {
-                if content_length.is_none() {
-                    if all_bytes.len() >= 5 {
-                        stream_id = buffer[0]; // Example: first byte indicates stream ID, adjust as needed
-                        content_length =
-                            Some(u32::from_le_bytes(all_bytes[1..5].try_into().unwrap()) as u32);
-                        all_bytes.drain(..5); // Remove the header bytes
-                    } else {
-                        // Not enough data to determine content length yet, wait for more
-                        break;
-                    }
-                } else if content_length.unwrap() as usize <= all_bytes.len() {
-                    let msg = &all_bytes[..content_length.unwrap() as usize];
-                    if stream_id == 0 {
-                        // Handle control message (e.g. JSON-RPC)
-                        let msg_str = String::from_utf8_lossy(msg);
-                        match serde_json::from_str::<ControlMessage>(&msg_str) {
-                            Ok(control_msg) => {
-                                // Process the control message and generate a response
-                                self.handle_control_message(control_msg);
-                                if self.exit {
-                                    eprintln!(
-                                        "Exiting message loop as requested by control message"
-                                    );
-                                    return Ok(());
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to parse control message: {}", e);
-                                // Optionally send an error response back to the client
-                            }
-                        }
-                    } else {
-                        match self.streams.get_mut(&stream_id) {
-                            Some(pinfo) => {
-                                if let Some(stream) = &mut pinfo.stream {
-                                    if let Err(e) = stream.write_all(msg) {
-                                        eprintln!("Stream {} write failed: {}", stream_id, e);
-                                        // TODO: remove the stream, notify the DA
-                                    }
-                                } else {
-                                    eprintln!("Stream {} is not currently connected", stream_id);
-                                }
-                            }
-                            None => {
-                                eprintln!("Received message for unknown stream ID: {}", stream_id);
-                            }
-                        }
-                    }
-                    all_bytes.drain(..content_length.unwrap() as usize); // Remove the processed message
-                    content_length = None; // Reset for the next message
                 }
             }
         }
@@ -544,7 +584,7 @@ impl ProxyServer {
                         return;
                     }
                 };
-                let count = 0;
+                let mut count = 0;
                 for id_string in &port_set.port_ids {
                     let listener = ports[count].try_clone().ok(); // Clone the TcpListener to keep it alive while we wait for connections
                     let port = listener.as_ref().unwrap().local_addr().unwrap().port();
@@ -560,6 +600,7 @@ impl ProxyServer {
                         stream_id_str: id_string.clone(),
                     });
                     self.next_stream_id += 1;
+                    count += 1;
                 }
             }
             let data = ControlResponseData::AllocatePorts { ports: ret_vec };
@@ -617,14 +658,14 @@ impl ProxyServer {
 
             // Stdout reader thread
             if let Some(stdout) = self.process.as_mut().unwrap().stdout.take() {
-                let tx = self.stream_data_tx.clone();
+                let tx = self.event_tx.clone();
                 std::thread::spawn(move || {
                     read_and_forward(StreamId::Stdout.to_u8(), stdout, tx);
                 });
             }
             // Stderr reader thread
             if let Some(stderr) = self.process.as_mut().unwrap().stderr.take() {
-                let tx = self.stream_data_tx.clone();
+                let tx = self.event_tx.clone();
                 std::thread::spawn(move || {
                     read_and_forward(StreamId::Stderr.to_u8(), stderr, tx);
                 });
@@ -653,32 +694,34 @@ impl ProxyServer {
 
     fn spawn_port_waiters(&mut self, ports: Vec<(u8, u16)>) {
         for (stream_id, port) in ports {
-            let port_tx = self.port_events_tx.clone();
-            let stream_tx = self.stream_data_tx.clone();
+            let event_tx = self.event_tx.clone();
 
             std::thread::spawn(move || {
                 match Self::wait_and_connect_sync(port, Duration::from_secs(10 * 60)) {
                     Ok(tcp_stream) => {
-                        eprintln!("Connected to port {}, starting forwarding", port);
+                        eprintln!(
+                            "Connected to stream_id {} port {}, starting forwarding",
+                            stream_id, port
+                        );
 
                         // Clone stream: one for reading (this thread), one for writing (main thread)
                         let read_stream = tcp_stream.try_clone().expect("Failed to clone stream");
 
-                        // Send the write stream to main thread
-                        port_tx
-                            .send(PortEvent::Connected {
+                        // Send the write-end to the main thread
+                        event_tx
+                            .send(ProxyEvent::PortConnected {
                                 stream_id,
                                 port,
-                                stream: tcp_stream, // Main thread writes to this
+                                stream: tcp_stream,
                             })
                             .ok();
 
                         // Start forwarding TCP → Client in THIS thread
-                        read_and_forward(stream_id, read_stream, stream_tx);
+                        read_and_forward(stream_id, read_stream, event_tx);
                     }
                     Err(e) => {
-                        port_tx
-                            .send(PortEvent::Failed {
+                        event_tx
+                            .send(ProxyEvent::PortFailed {
                                 stream_id,
                                 port,
                                 error: e.to_string(),
@@ -691,10 +734,15 @@ impl ProxyServer {
     }
 
     fn wait_and_connect_sync(port: u16, timeout: Duration) -> Result<TcpStream> {
+        eprintln!(
+            "Waiting for connection on port {} with timeout {:?}",
+            port, timeout
+        );
         let deadline = Instant::now() + timeout;
-        let mut interval: Duration = Duration::from_millis(10);
+        let mut interval: Duration = Duration::from_millis(100);
 
         while Instant::now() < deadline {
+            eprintln!("Attempting to connect to port {}...", port);
             match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(stream) => return Ok(stream),
                 Err(_) => {
@@ -703,6 +751,7 @@ impl ProxyServer {
                 }
             }
         }
+        eprintln!("Timeout waiting for port {}", port);
         Err(anyhow!("Timeout waiting for port {}", port))
     }
 }
@@ -728,7 +777,9 @@ mod tests {
     #[test]
     fn ensure_ts_exports() {
         let config = Config::from_env();
+        StreamId::export(&config).unwrap();
         ControlRequest::export(&config).unwrap();
+        ControlMessage::export(&config).unwrap();
         ProxyServerEvents::export(&config).unwrap();
         ControlResponse::export(&config).unwrap();
         ControlResponseData::export(&config).unwrap();
@@ -746,6 +797,7 @@ mod tests {
         header.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         stream.write_all(&header)?;
         stream.write_all(bytes)?;
+        stream.flush()?;
         Ok(())
     }
 
@@ -814,7 +866,7 @@ mod tests {
         loop {
             match TcpStream::connect(addr) {
                 Ok(stream) => return Ok(stream),
-                Err(e) => {
+                Err(_e) => {
                     if Instant::now() >= deadline {
                         return Err(io::Error::new(
                             io::ErrorKind::TimedOut,
@@ -885,12 +937,11 @@ mod tests {
                 ports_spec: PortAllocatorSpec {
                     all_ports: vec![PortSet {
                         start_port: 5000,
-                        port_ids: vec!["test-port".to_string()],
+                        port_ids: vec!["test-port0".to_string(), "test-port1".to_string()],
                     }],
                 },
             },
         };
-        seq += 1;
         let msg_bytes = serde_json::to_vec(&allc_ports_msg).unwrap();
         send_to_stream(
             StreamId::Control.to_u8(),
@@ -904,10 +955,14 @@ mod tests {
         let response: ControlResponse = serde_json::from_str(&msg).unwrap();
         assert!(response.success);
         if let Some(ControlResponseData::AllocatePorts { ports }) = response.data {
-            assert_eq!(ports.len(), 1);
+            assert_eq!(ports.len(), 2);
             assert_eq!(ports[0].stream_id, 3);
-            assert_eq!(ports[0].stream_id_str, "test-port");
+            assert_eq!(ports[0].stream_id_str, "test-port0");
             assert!(ports[0].port >= 5000);
+            assert_eq!(ports[1].stream_id, 4);
+            assert_eq!(ports[1].stream_id_str, "test-port1");
+            assert!(ports[1].port >= 5000);
+            assert!(ports[0].port != ports[1].port); // Should be different ports
         } else {
             panic!("Expected AllocatePorts response data");
         }
