@@ -172,7 +172,7 @@ export class GDBServerSession extends EventEmitter {
             } else {
                 let count = 0;
                 timer = setInterval(() => {
-                    if (resolved) {
+                    if (resolved || this.clientRequestedStop) {
                         killTimers();
                     }
                     this.session.handleMsg(GdbEventNames.Console, `Waiting for gdb-server to start ${++count}...\n`);
@@ -256,7 +256,9 @@ export class GDBServerSession extends EventEmitter {
             this.process = null;
         } else if (this.proxyClient) {
             try {
-                await this.proxyClient.stop();
+                const tmp = this.proxyClient;
+                this.proxyClient = null;
+                await tmp.stop();
             } catch (e: any) {
                 this.session.handleMsg(Stderr, `Error stopping gdb-server via proxy: ${e.message}\n`);
             }

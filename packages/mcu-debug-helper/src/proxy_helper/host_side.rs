@@ -69,12 +69,17 @@ enum ProxyEvent {
         stream_id: u8,
         port: u16,
         stream: TcpStream,
+        msg_seq: u64, // Sequence number of the original StartStream request that triggered this connection, used for sending the StreamStatus response
     },
+    /// A port is ready for a connection, client can now connect to the forwarded port, but we won't forward data until they do
+    PortReady { stream_id: u8, port: u16 },
+
     /// A port waiter failed to connect.
     PortFailed {
         stream_id: u8,
         port: u16,
         error: String,
+        msg_seq: u64, // Sequence number of the original StartStream request that triggered this connection, used for sending the StreamStatus response
     },
     /// Data received from a forwarded stream (stdout, stderr, GDB RSP, …).
     StreamData { stream_id: u8, data: Vec<u8> },
@@ -177,6 +182,10 @@ pub enum ControlRequest {
     #[serde(rename = "streamStatus")]
     StreamStatus { stream_id: u8 },
 
+    /* Open the stream now that the port is ready */
+    #[serde(rename = "startStream")]
+    StartStream { stream_id: u8 },
+
     /** Heartbeat message to keep the connection alive */
     #[serde(rename = "heartbeat")]
     Heartbeat,
@@ -205,6 +214,21 @@ pub struct ControlResponse {
 
 #[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "proxy-protocol/")]
+pub enum StreamStatus {
+    /** Server has not started listening on the port */
+    NotAvailable,
+    /** Server is ready to accept connections */
+    Ready,
+    /** Server is currently connected */
+    Connected,
+    /** Server has closed the connection */
+    Closed,
+    /** Server has timed out */
+    TimedOut,
+}
+
+#[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "proxy-protocol/")]
 pub enum ControlResponseData {
     /** Initialize response: Just a version string */
     #[serde(rename = "initialize")]
@@ -217,7 +241,7 @@ pub enum ControlResponseData {
     StartGdbServer { pid: u32 },
     /** StreamStatus response: Status of a specific stream */
     #[serde(rename = "streamStatus")]
-    StreamStatus { stream_id: u8, status: String },
+    StreamStatus { stream_id: u8, status: StreamStatus },
     /** Heartbeat response: Acknowledgment of heartbeat */
     #[serde(rename = "heartbeat")]
     Heartbeat,
@@ -264,11 +288,14 @@ pub enum ProxyServerEvents {
     #[serde(rename = "gdbServerExited")]
     GdbServerExited { pid: u32, exit_code: i32 },
     /** Stream has started */
-    #[serde(rename = "streamStarted")]
-    StreamStarted { stream_id: u8, port: u16 },
+    #[serde(rename = "streamReady")]
+    StreamReady { stream_id: u8, port: u16 },
     /** Stream has closed */
     #[serde(rename = "streamClosed")]
     StreamClosed { stream_id: u8 },
+    /** Stream has timed out while waiting for connection */
+    #[serde(rename = "streamTimedOut")]
+    StreamTimedOut { stream_id: u8 },
 }
 
 impl ProxyServerEvents {
@@ -326,6 +353,14 @@ impl ProxyServer {
         }
     }
 
+    pub fn end_process(&mut self) {
+        if let Some(child) = &mut self.process {
+            let _ = child.kill();
+            let _ = child.wait();
+            self.process = None;
+        }
+    }
+
     pub fn message_loop(&mut self) -> Result<()> {
         // Spawn a dedicated reader thread for the client connection so that the event
         // loop can block on event_rx.recv() and wake up instantly for *any* event
@@ -371,6 +406,7 @@ impl ProxyServer {
             match event {
                 ProxyEvent::IncomingClosed => {
                     eprintln!("Client connection closed");
+                    self.end_process();
                     break;
                 }
                 ProxyEvent::IncomingData(bytes) => {
@@ -441,21 +477,65 @@ impl ProxyServer {
                     stream_id,
                     port,
                     stream,
+                    msg_seq,
                 } => {
                     eprintln!("Port {} (stream {}) connected!", port, stream_id);
                     if let Some(pinfo) = self.streams.get_mut(&stream_id) {
                         pinfo.stream = Some(stream);
+                    } else {
+                        eprintln!("Internal Error: Received PortConnected for unknown stream_id {}, this should not happen", stream_id);
                     }
-                    let event = ProxyServerEvents::StreamStarted { stream_id, port };
+                    let data = ControlResponseData::StreamStatus {
+                        stream_id,
+                        status: StreamStatus::Connected,
+                    };
+                    ControlResponse::success(msg_seq, Some(data))
+                        .send(&mut self.stream)
+                        .unwrap_or_else(|e| {
+                            eprintln!("Failed to send success response: {}", e);
+                        });
+                    // let event = ProxyServerEvents::StreamStarted { stream_id, port };
+                    // let _ = event.send(&mut self.stream);
+                }
+                ProxyEvent::PortReady { stream_id, port } => {
+                    eprintln!(
+                        "Port {} (stream {}) is ready for connection!",
+                        port, stream_id
+                    );
+                    self.streams.insert(
+                        stream_id,
+                        PortInfo {
+                            port,
+                            stream_id,
+                            stream: None,
+                        },
+                    );
+                    let event = ProxyServerEvents::StreamReady { stream_id, port };
                     let _ = event.send(&mut self.stream);
                 }
                 ProxyEvent::PortFailed {
                     stream_id,
                     port,
                     error,
+                    msg_seq,
                 } => {
-                    eprintln!("Port {} failed: {} for stream {}", port, error, stream_id);
-                    // Handle failure, maybe retry or notify client
+                    if msg_seq != 0 {
+                        ControlResponse::error(
+                            msg_seq,
+                            format!(
+                                "Failed to connect to port {}, stream-id {}: {}",
+                                port, stream_id, error
+                            ),
+                        )
+                        .send(&mut self.stream)
+                        .unwrap_or_else(|e| {
+                            eprintln!("Failed to send error response: {}", e);
+                        });
+                    } else {
+                        let event = ProxyServerEvents::StreamTimedOut { stream_id };
+                        eprintln!("Port {} failed: {} for stream {}", port, error, stream_id);
+                        let _ = event.send(&mut self.stream);
+                    }
                 }
                 ProxyEvent::StreamData { stream_id, data } => {
                     send_to_stream(stream_id, &mut self.stream, &data).ok();
@@ -468,6 +548,7 @@ impl ProxyServer {
                 }
             }
         }
+        self.end_process();
         Ok(())
     }
 
@@ -486,14 +567,63 @@ impl ProxyServer {
                 self.handle_allocate_ports(&msg);
             }
             ControlRequest::StartGdbServer { .. } => {
-                self.handle_start_gdb_server(&msg);
                 eprintln!("Received StartGdbServer request");
+                self.handle_start_gdb_server(&msg);
+            }
+            ControlRequest::StartStream { stream_id } => {
+                eprintln!("Received StartStream request for stream_id {}", stream_id);
+                self.handle_start_stream(stream_id, msg.seq);
+            }
+            ControlRequest::EndSession => {
+                eprintln!("Received EndSession request, closing connection");
+                ControlResponse::success(msg.seq, None)
+                    .send(&mut self.stream)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Failed to send success response: {}", e);
+                    });
+                self.stream
+                    .shutdown(std::net::Shutdown::Both)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Failed to shutdown stream: {}", e);
+                    });
+                self.end_process();
+                self.exit = true;
+            }
+            ControlRequest::Heartbeat => {
+                eprintln!("Received Heartbeat request");
+                ControlResponse::success(msg.seq, Some(ControlResponseData::Heartbeat))
+                    .send(&mut self.stream)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Failed to send heartbeat response: {}", e);
+                    });
             }
             ControlRequest::StreamStatus { .. } => {
-                eprintln!("Received StreamStatus request");
-            }
-            _ => {
-                eprintln!("Received unknown control request: {:?}", msg.request);
+                let status = if let ControlRequest::StreamStatus { stream_id } = &msg.request {
+                    if let Some(pinfo) = self.streams.get(stream_id) {
+                        if pinfo.stream.is_some() {
+                            StreamStatus::Connected
+                        } else {
+                            StreamStatus::Ready
+                        }
+                    } else {
+                        StreamStatus::NotAvailable
+                    }
+                } else {
+                    StreamStatus::NotAvailable
+                };
+                let data = ControlResponseData::StreamStatus {
+                    stream_id: if let ControlRequest::StreamStatus { stream_id } = &msg.request {
+                        *stream_id
+                    } else {
+                        0
+                    },
+                    status,
+                };
+                ControlResponse::success(msg.seq, Some(data))
+                    .send(&mut self.stream)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Failed to send StreamStatus response: {}", e);
+                    });
             }
         }
     }
@@ -671,7 +801,7 @@ impl ProxyServer {
                 });
             }
 
-            self.spawn_port_waiters(ports);
+            self.spawn_port_waiters(ports, false, 0);
 
             let data = ControlResponseData::StartGdbServer {
                 pid: self.process.as_ref().unwrap().id(),
@@ -692,13 +822,25 @@ impl ProxyServer {
         }
     }
 
-    fn spawn_port_waiters(&mut self, ports: Vec<(u8, u16)>) {
+    fn spawn_port_waiters(&mut self, ports: Vec<(u8, u16)>, keep_open: bool, msg_seq: u64) {
         for (stream_id, port) in ports {
             let event_tx = self.event_tx.clone();
 
             std::thread::spawn(move || {
-                match Self::wait_and_connect_sync(port, Duration::from_secs(10 * 60)) {
-                    Ok(tcp_stream) => {
+                let duration = if keep_open {
+                    Duration::from_millis(30) // Shorter timeout when just checking for readiness
+                } else {
+                    Duration::from_secs(10 * 60) // Longer timeout when we intend to forward the stream
+                };
+                match Self::wait_and_connect_sync(port, duration, keep_open) {
+                    Ok(WaitPortResult::Ready(_)) => {
+                        eprintln!("Port {} is ready for stream {}, but keep_open is false, not forwarding", port, stream_id);
+                        // Notify main thread that the port is ready, even though we're not forwarding it
+                        event_tx
+                            .send(ProxyEvent::PortReady { stream_id, port })
+                            .ok();
+                    }
+                    Ok(WaitPortResult::Stream(tcp_stream)) => {
                         eprintln!(
                             "Connected to stream_id {} port {}, starting forwarding",
                             stream_id, port
@@ -713,6 +855,7 @@ impl ProxyServer {
                                 stream_id,
                                 port,
                                 stream: tcp_stream,
+                                msg_seq,
                             })
                             .ok();
 
@@ -725,6 +868,7 @@ impl ProxyServer {
                                 stream_id,
                                 port,
                                 error: e.to_string(),
+                                msg_seq,
                             })
                             .ok();
                     }
@@ -733,19 +877,51 @@ impl ProxyServer {
         }
     }
 
-    fn wait_and_connect_sync(port: u16, timeout: Duration) -> Result<TcpStream> {
+    fn handle_start_stream(&mut self, stream_id: u8, msg_seq: u64) {
+        if let Some(pinfo) = self.streams.get_mut(&stream_id) {
+            if pinfo.stream.is_none() {
+                let ports: Vec<(u8, u16)> = vec![(stream_id, pinfo.port)];
+                self.spawn_port_waiters(ports, true, msg_seq);
+            } else {
+                eprintln!("Stream {} is already connected", stream_id);
+            }
+        } else {
+            eprintln!(
+                "Received StartStream for unknown stream_id {}, ignoring",
+                stream_id
+            );
+        }
+    }
+
+    fn wait_and_connect_sync(
+        port: u16,
+        timeout: Duration,
+        keep_open: bool,
+    ) -> Result<WaitPortResult> {
         eprintln!(
             "Waiting for connection on port {} with timeout {:?}",
             port, timeout
         );
         let deadline = Instant::now() + timeout;
         let mut interval: Duration = Duration::from_millis(100);
+        let mut once = true;
 
-        while Instant::now() < deadline {
+        while once || Instant::now() < deadline {
             eprintln!("Attempting to connect to port {}...", port);
+            once = false;
             match TcpStream::connect(("127.0.0.1", port)) {
-                Ok(stream) => return Ok(stream),
+                Ok(stream) => {
+                    if keep_open {
+                        return Ok(WaitPortResult::Stream(stream));
+                    } else {
+                        stream.shutdown(std::net::Shutdown::Both).ok();
+                        return Ok(WaitPortResult::Ready(true));
+                    }
+                }
                 Err(_) => {
+                    if !keep_open {
+                        return Ok(WaitPortResult::Ready(false));
+                    }
                     std::thread::sleep(interval);
                     interval = (interval * 2).min(Duration::from_millis(200));
                 }
@@ -754,6 +930,11 @@ impl ProxyServer {
         eprintln!("Timeout waiting for port {}", port);
         Err(anyhow!("Timeout waiting for port {}", port))
     }
+}
+
+pub enum WaitPortResult {
+    Stream(TcpStream),
+    Ready(bool),
 }
 
 pub fn is_connected(stream: &TcpStream) -> bool {
@@ -778,6 +959,7 @@ mod tests {
     fn ensure_ts_exports() {
         let config = Config::from_env();
         StreamId::export(&config).unwrap();
+        StreamStatus::export(&config).unwrap();
         ControlRequest::export(&config).unwrap();
         ControlMessage::export(&config).unwrap();
         ProxyServerEvents::export(&config).unwrap();

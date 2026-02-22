@@ -52,5 +52,6 @@ export type ControlMessage = { seq: number } & (
       }
     | { method: "endSession" }
     | { method: "streamStatus"; params: { stream_id: number } }
+    | { method: "startStream"; params: { stream_id: number } }
     | { method: "heartbeat" }
 );
