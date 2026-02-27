@@ -181,6 +181,9 @@ export class CortexDebugConfigurationProvider implements vscode.DebugConfigurati
             case "stlink":
                 validationResponse = this.verifySTLinkConfiguration(folder, config);
                 break;
+            case "probe-rs":
+                validationResponse = this.verifyProbeRSConfiguration(folder, config);
+                break;
             case "pyocd":
                 validationResponse = this.verifyPyOCDConfiguration(folder, config);
                 break;
@@ -203,14 +206,6 @@ export class CortexDebugConfigurationProvider implements vscode.DebugConfigurati
             }
         }
 
-        const configuration = vscode.workspace.getConfiguration("mcu-debug");
-        if (config.pvtAdapterDebugOptions === undefined) {
-            (config as any).pvtAdapterDebugOptions = configuration.get("pvtAdapterDebugOptions", {});
-        }
-        if (typeof (config as any).pvtAdapterDebugOptions !== "object") {
-            (config as any).pvtAdapterDebugOptions = {};
-        }
-
         if (config.armToolchainPath) {
             config.toolchainPath = config.armToolchainPath;
         }
@@ -226,6 +221,7 @@ export class CortexDebugConfigurationProvider implements vscode.DebugConfigurati
             }
         }
 
+        const configuration = vscode.workspace.getConfiguration("mcu-debug");
         if (!config.toolchainPrefix) {
             config.toolchainPrefix = configuration.armToolchainPrefix || "arm-none-eabi";
         }
@@ -656,6 +652,19 @@ export class CortexDebugConfigurationProvider implements vscode.DebugConfigurati
 
         if (config.rtos) {
             return "The ST-Link GDB Server does not have support for the rtos option.";
+        }
+
+        return "";
+    }
+
+    private verifyProbeRSConfiguration(folder: vscode.WorkspaceFolder | undefined, config: ConfigOptions): string {
+        if (config.probeRSPath && !config.serverpath) {
+            config.serverpath = config.probeRSPath;
+        }
+        this.setOsSpecficConfigSetting(config, "serverpath", "probeRSPath");
+
+        if (config.rtos) {
+            return "The probe-rs GDB Server does not have support for the rtos option.";
         }
 
         return "";

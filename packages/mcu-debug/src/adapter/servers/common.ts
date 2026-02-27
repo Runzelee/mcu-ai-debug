@@ -374,7 +374,8 @@ export interface ConfigurationArguments extends DebugProtocol.LaunchRequestArgum
     pvtMyConfigFromParent: ChainedConfig; // My configuration coming from the parent
     pvtAvoidPorts: number[];
     pvtOpenOCDDebug: boolean;
-    pvtAdapterDebugOptions: DebugOptions | undefined;
+    env: { [key: string]: string };
+    envFile: string;
 
     numberOfProcessors: number;
     targetProcessor: number;
@@ -1094,11 +1095,6 @@ export function getPathRelative(base: string, target: string) {
     }
     const ret = targetElts.join("/");
     return ret;
-}
-
-class DebugOptions {
-    public file: string = "";
-    public disassembly: boolean = false;
 }
 
 /**

@@ -12,6 +12,7 @@ use std::io::Read;
 use std::io::Write;
 use std::net::TcpListener;
 use std::net::TcpStream;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
@@ -679,6 +680,9 @@ impl ProxyServer {
                 .unwrap()
                 .replace('\\', "/");
             if err != true {
+                // Remove any stale files/dirs from previous runs with the same remote_launch_uid. This ensures a clean state
+                // for each new session and prevents issues caused by leftover files.
+                fs::remove_dir_all(&dir).ok(); // Ignore error, the directory might not exist
                 match fs::create_dir_all(&dir) {
                     Ok(_) => {}
                     Err(e) => {
@@ -816,20 +820,25 @@ impl ProxyServer {
                     (plistner.stream_id, plistner.port)
                 })
                 .collect();
-            let child = Command::new(server_path)
+            let dir = self.server_launch_uid.clone();
+            let child = match Command::new(server_path)
                 .args(server_args)
                 .envs(server_env.as_ref().unwrap_or(&HashMap::new()))
+                .current_dir(dir)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
-                .unwrap_or_else(|e| {
+            {
+                Ok(child) => child,
+                Err(e) => {
                     eprintln!("Failed to launch gdb-server: {}", e);
                     ControlResponse::error(msg.seq, format!("Failed to launch gdb-server: {}", e))
                         .send(&mut self.stream)
                         .ok();
-                    // self.exit = true;
-                    panic!("Failed to launch gdb-server: {}", e);
-                });
+                    self.exit = true;
+                    return; // message_loop will see self.exit and shut down cleanly
+                }
+            };
 
             self.process = Some(child);
 
@@ -875,7 +884,7 @@ impl ProxyServer {
 
             std::thread::spawn(move || {
                 let duration = if keep_open {
-                    Duration::from_millis(30) // Shorter timeout when just checking for readiness
+                    Duration::from_millis(300) // Shorter timeout when just checking for readiness
                 } else {
                     Duration::from_secs(10 * 60) // Longer timeout when we intend to forward the stream
                 };
@@ -986,6 +995,7 @@ impl ProxyServer {
         {
             eprintln!("Received SyncFile request for path {}", relative_path);
             let full_path = PathBuf::from(self.server_launch_uid.clone()).join(relative_path);
+            create_parent_dirs(full_path.to_str().unwrap());
             match fs::write(full_path.clone(), content) {
                 Ok(_) => {
                     ControlResponse::success(msg.seq, None)
@@ -1034,6 +1044,16 @@ pub fn is_connected(stream: &TcpStream) -> bool {
         Ok(_) => true,
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => true, // Still connected
         Err(_) => false,                                         // Disconnected
+    }
+}
+
+fn create_parent_dirs(file_path_str: &str) {
+    let path = Path::new(file_path_str);
+
+    // Get the parent directory path
+    if let Some(parent_dir) = path.parent() {
+        // Create all missing parent directories (equivalent to mkdir -p)
+        fs::create_dir_all(parent_dir).ok();
     }
 }
 

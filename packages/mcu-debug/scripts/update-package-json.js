@@ -120,7 +120,7 @@ function generateDebuggers() {
             configurationSnippets: [
                 {
                     label: "MCU Debug: JLink",
-                    description: "Debugs an embedded ARM Cortex-M microcontroller using GDB + JLink",
+                    description: "Debugs an embedded microcontroller using GDB + JLink",
                     body: {
                         cwd: '^"\\${workspaceFolder}"',
                         executable: "${1:./bin/executable.elf}",
@@ -137,7 +137,7 @@ function generateDebuggers() {
                 },
                 {
                     label: "MCU Debug: OpenOCD",
-                    description: "Debugs an embedded ARM Cortex-M microcontroller using GDB + OpenOCD",
+                    description: "Debugs an embedded microcontroller using GDB + OpenOCD",
                     body: {
                         cwd: '^"\\${workspaceRoot}"',
                         executable: "${1:./bin/executable.elf}",
@@ -155,7 +155,7 @@ function generateDebuggers() {
                 },
                 {
                     label: "MCU Debug: ST-LINK",
-                    description: "Debugs an embedded ARM Cortex-M microcontroller using GDB + STMicroelectronic's ST-LINK_gdbserver part of STM32CubeIDE",
+                    description: "Debugs an embedded microcontroller using GDB + ST-LINK_gdbserver from STMicroelectronics",
                     body: {
                         cwd: '^"\\${workspaceFolder}"',
                         executable: "${1:./bin/executable.elf}",
@@ -171,7 +171,7 @@ function generateDebuggers() {
                 },
                 {
                     label: "MCU Debug: PyOCD",
-                    description: "Debugs an embedded ARM Cortex-M microcontroller using GDB + PyOCD",
+                    description: "Debugs an embedded microcontroller using GDB + PyOCD",
                     body: {
                         cwd: '^"\\${workspaceFolder}"',
                         executable: "${1:./bin/executable.elf}",
@@ -186,19 +186,23 @@ function generateDebuggers() {
                     },
                 },
                 {
-                    label: "MCU Debug: ST-Link",
-                    description: "Debugs an embedded ARM Cortex-M microcontroller using GDB + Texane's stlink GDB Server",
+                    label: "MCU Debug: Probe-RS (experimental)",
+                    description: "Debugs an embedded microcontroller using GDB + Probe-RS",
                     body: {
                         cwd: '^"\\${workspaceFolder}"',
                         executable: "${1:./bin/executable.elf}",
-                        name: "${6:Debug with ST-Link}",
+                        name: "${6:Debug with Probe-RS (experimental)}",
                         request: "launch",
                         type: "mcu-debug",
+                        loadFiles: [],
+                        device: "specify-your-chip-here",
+                        serialNumber: "optional-board-serial-number",
+                        interface: "swd",
                         runToEntryPoint: "main",
                         debugFlags: {
                             gdbTraces: false,
                         },
-                        servertype: "stlink",
+                        servertype: "probe-rs",
                     },
                 },
             ],

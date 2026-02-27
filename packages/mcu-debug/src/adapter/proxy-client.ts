@@ -1,6 +1,8 @@
 import * as net from "net";
+import * as fs from "fs";
+import * as path from "path";
 import { GDBDebugSession } from "./gdb-session";
-import { GDBServerSession } from "./server-session";
+import { GDBServerSession, getEnvFromConfig } from "./server-session";
 import { canonicalizePath, ConfigurationArguments, TcpPortDef, TcpPortDefMap } from "./servers/common";
 import { existsSync } from "fs";
 import { DebugHelper } from "./helper";
@@ -95,32 +97,34 @@ export class ProxyClient extends EventEmitter {
     private async syncFiles(cwd: string) {
         const syncFiles = this.session.args.hostConfig?.syncFiles || [];
         for (const file of syncFiles) {
-            const localPath = file.local;
-            const remotePath = file.remote || localPath;
+            const localPattern = file.local;
+            if (!localPattern) {
+                continue;
+            }
+            const remotePath = file.remote ? canonicalizePath(file.remote) : "";
             try {
-                const files = await this.findFiles(cwd, localPath);
-                if (!existsSync(localPath)) {
-                    this.session.handleMsg(Stderr, `File specified for syncing does not exist: ${localPath}`);
-                    continue;
-                }
-                try {
-                    const content = Buffer.from(require("fs").readFileSync(localPath)).toJSON().data as Array<number>;
-                    const cmd: ControlMessage = {
-                        seq: this.nextSeq++,
-                        method: "syncFile",
-                        params: {
-                            relative_path: remotePath,
-                            content: content,
-                        },
-                    };
-                    await this.awaitWithTimeout(this.sendControlCommand(cmd), this.timeout).catch((err) => {
-                        this.session.handleMsg(Stderr, `Failed to sync file ${localPath} to ${remotePath}: ${err}`);
-                    });
-                } catch (err) {
-                    this.session.handleMsg(Stderr, `Failed to read file for syncing: ${localPath}, error: ${err}`);
+                const files = await this.findFiles(cwd, localPattern);
+                for (const f of files) {
+                    try {
+                        const content = Buffer.from(fs.readFileSync(f)).toJSON().data as Array<number>;
+                        const rPath = remotePath ? remotePath + "/" + path.basename(f) : canonicalizePath(f);
+                        const cmd: ControlMessage = {
+                            seq: this.nextSeq++,
+                            method: "syncFile",
+                            params: {
+                                relative_path: rPath,
+                                content: content,
+                            },
+                        };
+                        await this.awaitWithTimeout(this.sendControlCommand(cmd), this.timeout).catch((err) => {
+                            this.session.handleMsg(Stderr, `Failed to sync file ${f} to ${remotePath}: ${err}`);
+                        });
+                    } catch (err) {
+                        this.session.handleMsg(Stderr, `Failed to read file for syncing: ${f}, error: ${err}`);
+                    }
                 }
             } catch (err) {
-                this.session.handleMsg(Stderr, `Failed to find files for syncing with pattern ${localPath}: ${err}`);
+                this.session.handleMsg(Stderr, `Failed to find files for syncing with pattern ${localPattern}: ${err}`);
             }
         }
     }
@@ -301,7 +305,7 @@ export class ProxyClient extends EventEmitter {
                 config_args: this.session.args,
                 server_path: executable,
                 server_args: args,
-                server_env: {},
+                server_env: getEnvFromConfig(this.session.args),
                 // server_cwd: serverCwd,
                 server_regexes: regexes.map((r) => r.source),
             },
@@ -398,11 +402,13 @@ export class ProxyClient extends EventEmitter {
         const stream_name = portReserved.stream_id_str;
         try {
             portReserved.status = "ready";
+            /*
             if (!portReserved.stream_id_str.startsWith("gdb")) {
                 // If this is not a gdb stream we open right away. For geb streams, if we open right away we will
                 // miss the initial handshake between the gdb-server and gdb. So, we wait until gdb connects to the stream
                 await this.startStream(stream_id);
             }
+                */
             const remoteStream = new RemoteStream(this, portDef, portReserved);
             await remoteStream.initialize();
             this.clientStreams.set(stream_id, remoteStream);
@@ -417,6 +423,7 @@ export class ProxyClient extends EventEmitter {
             throw new Error(`Attempted to open unknown stream_id ${stream_id}`);
         }
         const stream_name = portReserved.stream_id_str;
+        this.session.handleMsg(Stdout, `Starting stream ${stream_name} (stream_id ${stream_id})`);
         const startStreamCmd: ControlMessage = {
             seq: this.nextSeq++,
             method: "startStream",
@@ -434,6 +441,7 @@ export class ProxyClient extends EventEmitter {
     private handleStreamClosed(stream_id: any) {
         const stream = this.clientStreams.get(stream_id);
         if (stream) {
+            this.session.handleMsg(Stdout, `Closing stream ${stream_id}`);
             stream.close();
             this.clientStreams.delete(stream_id);
         }
@@ -488,19 +496,23 @@ export class RemoteStream {
             })
             .on("listening", () => {
                 this.portDef.remotePort = this.pInfo.port;
+                this.proxyManager.session.handleMsg(
+                    Stdout,
+                    `Local server for stream ${this.pInfo.stream_id_str} is listening on port ${this.portDef.localPort}, forwarding to remote port ${this.pInfo.port}`,
+                );
                 this.proxyManager.emit("streamStarted", this.portDef);
             })
             .listen(this.portDef.localPort);
     }
 
     dataFromServer(data: Buffer) {
-        this.proxyManager.session.handleMsg(Stdout, `Received data from proxy for stream ${this.pInfo.stream_id_str} (stream_id ${this.pInfo.stream_id}): ${data.toString()}`);
+        this.proxyManager.session.handleMsg(Stdout, `==> Received data from proxy for stream ${this.pInfo.stream_id_str} (stream_id ${this.pInfo.stream_id}): ${data.toString()}`);
         // Should we buffer this if there are no clients connected? For now we just drop it, but maybe we should
         // buffer it and send it when a client connects?
         if (this.clientConnections.length === 0 || this.pInfo.status !== "running") {
             this.proxyManager.session.handleMsg(
                 Stdout,
-                `Buffering data from proxy for stream ${this.pInfo.stream_id_str} (stream_id ${this.pInfo.stream_id}) because there are no clients connected or stream is not running`,
+                `Buffering data from proxy for stream ${this.pInfo.stream_id_str} (stream_id ${this.pInfo.stream_id}) because there are no clients connected or stream is not running, data: '${data.toString()}'`,
             );
             this.fromServerBuffer = Buffer.concat([this.fromServerBuffer, data]);
         } else {
@@ -517,7 +529,10 @@ export class RemoteStream {
 
     dataFromClent(data: Buffer) {
         if (this.pInfo.status !== "running") {
-            this.proxyManager.session.handleMsg(Stdout, `Buffering data to proxy for stream ${this.pInfo.stream_id_str} (stream_id ${this.pInfo.stream_id}) because the stream is not running`);
+            this.proxyManager.session.handleMsg(
+                Stdout,
+                `<== Buffering data to proxy for stream ${this.pInfo.stream_id_str} (stream_id ${this.pInfo.stream_id}) because the stream is not running, data: '${data.toString()}'`,
+            );
             this.toServerBuffer = Buffer.concat([this.toServerBuffer, data]);
             return;
         }

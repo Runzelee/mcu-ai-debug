@@ -1,9 +1,11 @@
+const { type } = require("node:os");
+
 module.exports = {
     servertype: {
         type: "string",
         description:
-            'GDB Server type - supported types are jlink, openocd, pyocd, pe, stlink, stutil, qemu, bmp and external. For "external", [please read our Wiki](https://github.com/mcu-debug/mcu-debug/wiki/External-gdb-server-configuration). The executable in your PATH is used by default, to override this use serverpath.',
-        enum: ["jlink", "openocd", "pyocd", "stutil", "stlink", "bmp", "pe", "qemu", "external"],
+            'GDB Server type - supported types are jlink, openocd, probe-rs, pyocd, pe, stlink, stutil, qemu, bmp and external. For "external", [please read our Wiki](https://github.com/mcu-debug/mcu-debug/wiki/External-gdb-server-configuration). The executable in your PATH is used by default, to override this use serverpath.',
+        enum: ["jlink", "openocd", "probe-rs", "pyocd", "stutil", "stlink", "bmp", "pe", "qemu", "external"],
     },
     cwd: {
         description: "Directory to run commands from",
@@ -127,7 +129,7 @@ module.exports = {
     },
     device: {
         default: "",
-        description: "Target Device Identifier",
+        description: "Target Device Identifier, needed for probe-rs and some other server types. For probe-rs, this can be a chip name (e.g. 'STM32F103C8')",
         type: "string",
     },
     rtos: {
@@ -170,6 +172,17 @@ module.exports = {
     executable: {
         description: "Path of executable for symbols and program information. See also `loadFiles`, `symbolFiles`",
         type: "string",
+    },
+    env: {
+        description: "Environment variables defined as key, value pairs to set for the GDB Server process.",
+        type: "object",
+        additionalProperties: { type: "string" },
+        default: {},
+    },
+    envFile: {
+        description: "Path to a file to read environment variables from for the GDB Server process. The file should have lines in the format KEY=VALUE.",
+        type: "string",
+        default: null,
     },
     loadFiles: {
         description: "List of files (hex/bin/elf files) to load/program instead of the executable file.",
@@ -264,7 +277,7 @@ module.exports = {
     liveWatch: {
         description: "An object with parameters for Live Watch",
         properties: {
-            enabled: { default: false, description: "Enable/Disable Live Watch. Only applies to OpenOCD", type: "boolean" },
+            enabled: { default: false, description: "Enable/Disable Live Watch.", type: "boolean" },
             samplesPerSecond: { default: 2, description: "Maximum number of samples per second.", type: "number", multipleOf: 0.25, minimum: 0, maximum: 20 },
         },
         default: { enabled: true, samplesPerSecond: 4 },

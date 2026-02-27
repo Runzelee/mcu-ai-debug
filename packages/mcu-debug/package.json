@@ -483,10 +483,11 @@
             "properties": {
               "servertype": {
                 "type": "string",
-                "description": "GDB Server type - supported types are jlink, openocd, pyocd, pe, stlink, stutil, qemu, bmp and external. For \"external\", [please read our Wiki](https://github.com/mcu-debug/mcu-debug/wiki/External-gdb-server-configuration). The executable in your PATH is used by default, to override this use serverpath.",
+                "description": "GDB Server type - supported types are jlink, openocd, probe-rs, pyocd, pe, stlink, stutil, qemu, bmp and external. For \"external\", [please read our Wiki](https://github.com/mcu-debug/mcu-debug/wiki/External-gdb-server-configuration). The executable in your PATH is used by default, to override this use serverpath.",
                 "enum": [
                   "jlink",
                   "openocd",
+                  "probe-rs",
                   "pyocd",
                   "stutil",
                   "stlink",
@@ -671,7 +672,7 @@
               },
               "device": {
                 "default": "",
-                "description": "Target Device Identifier",
+                "description": "Target Device Identifier, needed for probe-rs and some other server types. For probe-rs, this can be a chip name (e.g. 'STM32F103C8')",
                 "type": "string"
               },
               "rtos": {
@@ -715,6 +716,19 @@
               "executable": {
                 "description": "Path of executable for symbols and program information. See also `loadFiles`, `symbolFiles`",
                 "type": "string"
+              },
+              "env": {
+                "description": "Environment variables defined as key, value pairs to set for the GDB Server process.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "envFile": {
+                "description": "Path to a file to read environment variables from for the GDB Server process. The file should have lines in the format KEY=VALUE.",
+                "type": "string",
+                "default": null
               },
               "loadFiles": {
                 "description": "List of files (hex/bin/elf files) to load/program instead of the executable file.",
@@ -868,7 +882,7 @@
                 "properties": {
                   "enabled": {
                     "default": false,
-                    "description": "Enable/Disable Live Watch. Only applies to OpenOCD",
+                    "description": "Enable/Disable Live Watch.",
                     "type": "boolean"
                   },
                   "samplesPerSecond": {
@@ -1917,10 +1931,11 @@
             "properties": {
               "servertype": {
                 "type": "string",
-                "description": "GDB Server type - supported types are jlink, openocd, pyocd, pe, stlink, stutil, qemu, bmp and external. For \"external\", [please read our Wiki](https://github.com/mcu-debug/mcu-debug/wiki/External-gdb-server-configuration). The executable in your PATH is used by default, to override this use serverpath.",
+                "description": "GDB Server type - supported types are jlink, openocd, probe-rs, pyocd, pe, stlink, stutil, qemu, bmp and external. For \"external\", [please read our Wiki](https://github.com/mcu-debug/mcu-debug/wiki/External-gdb-server-configuration). The executable in your PATH is used by default, to override this use serverpath.",
                 "enum": [
                   "jlink",
                   "openocd",
+                  "probe-rs",
                   "pyocd",
                   "stutil",
                   "stlink",
@@ -2105,7 +2120,7 @@
               },
               "device": {
                 "default": "",
-                "description": "Target Device Identifier",
+                "description": "Target Device Identifier, needed for probe-rs and some other server types. For probe-rs, this can be a chip name (e.g. 'STM32F103C8')",
                 "type": "string"
               },
               "rtos": {
@@ -2149,6 +2164,19 @@
               "executable": {
                 "description": "Path of executable for symbols and program information. See also `loadFiles`, `symbolFiles`",
                 "type": "string"
+              },
+              "env": {
+                "description": "Environment variables defined as key, value pairs to set for the GDB Server process.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "envFile": {
+                "description": "Path to a file to read environment variables from for the GDB Server process. The file should have lines in the format KEY=VALUE.",
+                "type": "string",
+                "default": null
               },
               "loadFiles": {
                 "description": "List of files (hex/bin/elf files) to load/program instead of the executable file.",
@@ -2302,7 +2330,7 @@
                 "properties": {
                   "enabled": {
                     "default": false,
-                    "description": "Enable/Disable Live Watch. Only applies to OpenOCD",
+                    "description": "Enable/Disable Live Watch.",
                     "type": "boolean"
                   },
                   "samplesPerSecond": {
@@ -3360,7 +3388,7 @@
         "configurationSnippets": [
           {
             "label": "MCU Debug: JLink",
-            "description": "Debugs an embedded ARM Cortex-M microcontroller using GDB + JLink",
+            "description": "Debugs an embedded microcontroller using GDB + JLink",
             "body": {
               "cwd": "^\"\\${workspaceFolder}\"",
               "executable": "${1:./bin/executable.elf}",
@@ -3377,7 +3405,7 @@
           },
           {
             "label": "MCU Debug: OpenOCD",
-            "description": "Debugs an embedded ARM Cortex-M microcontroller using GDB + OpenOCD",
+            "description": "Debugs an embedded microcontroller using GDB + OpenOCD",
             "body": {
               "cwd": "^\"\\${workspaceRoot}\"",
               "executable": "${1:./bin/executable.elf}",
@@ -3395,7 +3423,7 @@
           },
           {
             "label": "MCU Debug: ST-LINK",
-            "description": "Debugs an embedded ARM Cortex-M microcontroller using GDB + STMicroelectronic's ST-LINK_gdbserver part of STM32CubeIDE",
+            "description": "Debugs an embedded microcontroller using GDB + ST-LINK_gdbserver from STMicroelectronics",
             "body": {
               "cwd": "^\"\\${workspaceFolder}\"",
               "executable": "${1:./bin/executable.elf}",
@@ -3411,7 +3439,7 @@
           },
           {
             "label": "MCU Debug: PyOCD",
-            "description": "Debugs an embedded ARM Cortex-M microcontroller using GDB + PyOCD",
+            "description": "Debugs an embedded microcontroller using GDB + PyOCD",
             "body": {
               "cwd": "^\"\\${workspaceFolder}\"",
               "executable": "${1:./bin/executable.elf}",
@@ -3426,19 +3454,23 @@
             }
           },
           {
-            "label": "MCU Debug: ST-Link",
-            "description": "Debugs an embedded ARM Cortex-M microcontroller using GDB + Texane's stlink GDB Server",
+            "label": "MCU Debug: Probe-RS (experimental)",
+            "description": "Debugs an embedded microcontroller using GDB + Probe-RS",
             "body": {
               "cwd": "^\"\\${workspaceFolder}\"",
               "executable": "${1:./bin/executable.elf}",
-              "name": "${6:Debug with ST-Link}",
+              "name": "${6:Debug with Probe-RS (experimental)}",
               "request": "launch",
               "type": "mcu-debug",
+              "loadFiles": [],
+              "device": "specify-your-chip-here",
+              "serialNumber": "optional-board-serial-number",
+              "interface": "swd",
               "runToEntryPoint": "main",
               "debugFlags": {
                 "gdbTraces": false
               },
-              "servertype": "stlink"
+              "servertype": "probe-rs"
             }
           }
         ]
