@@ -24,7 +24,15 @@ pub const CURRENT_VERSION: &str = "1.0.3";
 static STREAM_MUTEX: Mutex<()> = Mutex::new(()); // Global mutex to synchronize access to the main stream for sending responses/events
 
 use crate::common::tcpports::reserve_free_ports;
+use crate::proxy_helper::port_monitor::wait_for_ports;
+use crate::proxy_helper::run::PortWaitMode;
 use crate::proxy_helper::run::ProxyArgs;
+
+macro_rules! eprintln {
+    ($($arg:tt)*) => {
+        log::info!($($arg)*);
+    };
+}
 
 pub fn send_to_stream(stream_id: u8, stream: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
     let _lock = STREAM_MUTEX.lock().expect("failed to acquire stream lock"); // Acquire the global mutex before sending
@@ -63,7 +71,7 @@ fn read_and_forward<R: Read>(stream_id: u8, mut reader: R, tx: Sender<ProxyEvent
 // Unified event type for the main event loop. All background threads (control-stream
 // reader, port waiters, stdout/stderr forwarders) send events through one channel so
 // message_loop can block on recv() instead of polling + sleeping.
-enum ProxyEvent {
+pub enum ProxyEvent {
     /// Raw bytes received from the client TCP connection.
     IncomingData(Vec<u8>),
     /// Client connection closed (EOF or error).
@@ -876,7 +884,19 @@ impl ProxyServer {
                 });
             }
 
-            self.spawn_port_waiters(ports, true, 0);
+            match self.args.port_wait_mode {
+                PortWaitMode::ConnectHold => {
+                    self.spawn_port_waiters(ports, true, 0);
+                }
+                PortWaitMode::ConnectProbe => {
+                    self.spawn_port_waiters(ports, false, 0);
+                }
+                PortWaitMode::Monitor => {
+                    if let Err(e) = wait_for_ports(ports, self.event_tx.clone()) {
+                        eprintln!("Failed to start port monitor: {}", e);
+                    }
+                }
+            }
 
             let data = ControlResponseData::StartGdbServer {
                 pid: self.process.as_ref().unwrap().id(),
@@ -1219,6 +1239,9 @@ mod tests {
                 port: 4567,
                 token: "adis-ababa".to_string(),
                 debug: false,
+                port_wait_mode: PortWaitMode::ConnectHold,
+                log_stderr: false,
+                log_dir: None,
             };
             let _ = crate::proxy_helper::run::run(args);
         });

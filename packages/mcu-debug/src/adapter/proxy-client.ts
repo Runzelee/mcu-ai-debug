@@ -478,12 +478,12 @@ export class RemoteStream {
 
     public async initialize() {
         this.server = net
-            .createServer((socket) => {
+            .createServer(async (socket) => {
                 this.clientConnections.push(socket);
                 if (this.pInfo.status !== "running") {
                     // this was deferred because gdb-streams need to wait for handshake or else the gdb-server
                     // might reject the connection. For non-gdb streams we can just start right away
-                    this.startStream(); // Force opening the stream
+                    await this.startStream(); // Force opening the stream
                 }
                 if (this.fromServerBuffer.length > 0) {
                     this.dataFromServer(this.fromServerBuffer);
