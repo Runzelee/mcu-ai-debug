@@ -21,9 +21,12 @@ use clap::Args;
 use clap::ValueEnum;
 use flexi_logger::{Age, Cleanup, Criterion, Duplicate, FileSpec, Logger, LoggerHandle, Naming};
 use std::{
+    backtrace::Backtrace,
     io::Write,
     net::{Ipv4Addr, TcpListener},
+    panic,
     path::PathBuf,
+    sync::Once,
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -71,7 +74,7 @@ pub struct ProxyArgs {
     pub log_dir: Option<String>,
 }
 
-fn init_logging(args: &ProxyArgs) -> Result<LoggerHandle> {
+fn init_logging(args: &ProxyArgs) -> Option<LoggerHandle> {
     let log_dir = args.log_dir.clone().map(PathBuf::from).unwrap_or_else(|| {
         std::env::temp_dir()
             .join("mcu-debug-helper")
@@ -84,31 +87,79 @@ fn init_logging(args: &ProxyArgs) -> Result<LoggerHandle> {
         .as_secs();
     let launch_id = format!("{}-{}", std::process::id(), ts);
 
-    let logger = Logger::try_with_env_or_str(if args.debug { "debug" } else { "info" })?
-        .format(flexi_logger::detailed_format)
-        .log_to_file(
-            FileSpec::default()
-                .directory(log_dir)
-                .basename("proxy-helper")
-                .discriminant(launch_id)
-                .suffix("log"),
-        )
-        .rotate(
-            Criterion::Age(Age::Day),
-            Naming::Timestamps,
-            Cleanup::KeepLogFiles(14),
-        )
-        .duplicate_to_stderr(if args.log_stderr {
-            Duplicate::All
-        } else {
-            Duplicate::None
-        });
+    let logger = match Logger::try_with_env_or_str(if args.debug { "debug" } else { "info" }) {
+        Ok(logger) => logger,
+        Err(e) => {
+            eprintln!("Logger configuration failed: {}", e);
+            return None;
+        }
+    }
+    .format(flexi_logger::detailed_format)
+    .log_to_file(
+        FileSpec::default()
+            .directory(log_dir)
+            .basename("proxy-helper")
+            .discriminant(launch_id)
+            .suffix("log"),
+    )
+    .rotate(
+        Criterion::Age(Age::Day),
+        Naming::Timestamps,
+        Cleanup::KeepLogFiles(14),
+    )
+    .duplicate_to_stderr(if args.log_stderr {
+        Duplicate::All
+    } else {
+        Duplicate::None
+    });
 
-    Ok(logger.start()?)
+    match logger.start() {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            eprintln!(
+                "Logger initialization failed, continuing without file logger: {}",
+                e
+            );
+            None
+        }
+    }
+}
+
+fn install_panic_hook() {
+    static PANIC_HOOK_INIT: Once = Once::new();
+
+    PANIC_HOOK_INIT.call_once(|| {
+        panic::set_hook(Box::new(|panic_info| {
+            let thread = thread::current();
+            let thread_name = thread.name().unwrap_or("<unnamed>");
+            let payload = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            let location = panic_info
+                .location()
+                .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let backtrace = Backtrace::force_capture();
+
+            log::error!(
+                "panic captured: thread={} id={:?} location={} payload={}\nbacktrace:\n{:?}",
+                thread_name,
+                thread.id(),
+                location,
+                payload,
+                backtrace
+            );
+        }));
+    });
 }
 
 pub fn run(args: ProxyArgs) -> Result<()> {
-    let _log_handle = init_logging(&args)?;
+    let _log_handle = init_logging(&args);
+    install_panic_hook();
     crate::common::debug::set_debug(args.debug);
     log::info!("Port wait mode: {:?}", args.port_wait_mode);
     log::info!(
@@ -188,4 +239,40 @@ pub fn run(args: ProxyArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panic_in_thread_does_not_kill_process() {
+        let temp = tempfile::tempdir().expect("failed to create temp dir");
+        let args = ProxyArgs {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            token: "test-token".to_string(),
+            debug: true,
+            port_wait_mode: PortWaitMode::ConnectHold,
+            log_stderr: false,
+            log_dir: Some(temp.path().to_string_lossy().to_string()),
+        };
+
+        let _log_handle = init_logging(&args);
+        install_panic_hook();
+
+        let join = std::thread::Builder::new()
+            .name("panic-test-thread".to_string())
+            .spawn(|| {
+                panic!("intentional panic for logging test");
+            })
+            .expect("failed to spawn panic thread")
+            .join();
+        assert!(join.is_err());
+
+        let ok = std::thread::spawn(|| 7usize)
+            .join()
+            .expect("non-panicking thread should complete");
+        assert_eq!(ok, 7usize);
+    }
 }
