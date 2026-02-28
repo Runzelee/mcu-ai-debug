@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as os from "os";
+import { ProxyHostType, resolveProxyNetworkMode } from "@mcu-debug/shared";
 import { STLinkServerController } from "../adapter/servers/stlink";
 import { GDBServerConsole } from "./server_console";
 import { parseAddress } from "./utils";
@@ -41,6 +42,14 @@ const JLINK_VALID_RTOS: string[] = ["Azure", "ChibiOS", "embOS", "FreeRTOS", "Nu
 
 export class CortexDebugConfigurationProvider implements vscode.DebugConfigurationProvider {
     constructor(private context: vscode.ExtensionContext) {}
+
+    private resolveNetworkMode(config: ConfigOptions): string | undefined {
+        const hostType = config.hostConfig?.type as ProxyHostType | undefined;
+        if (!hostType) {
+            return undefined;
+        }
+        return resolveProxyNetworkMode(hostType, vscode.env.remoteName);
+    }
 
     public provideDebugConfigurations(): vscode.ProviderResult<vscode.DebugConfiguration[]> {
         return [
@@ -239,6 +248,10 @@ export class CortexDebugConfigurationProvider implements vscode.DebugConfigurati
         if (validationResponse) {
             vscode.window.showErrorMessage(validationResponse);
             return undefined;
+        }
+
+        if (config.hostConfig) {
+            config.hostConfig.pvtNetworkMode = this.resolveNetworkMode(config);
         }
 
         return config;

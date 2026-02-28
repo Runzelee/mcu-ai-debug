@@ -48,12 +48,13 @@ export class ProxyClient extends EventEmitter {
         if (!this.args.hostConfig) {
             return false;
         }
+        const networkMode = this.args.hostConfig.pvtNetworkMode || this.args.hostConfig.type;
         const remoteHost = this.args.hostConfig.pvtProxyHost || "127.0.0.1";
         const remotePort = this.args.hostConfig.pvtProxyPort || 4567;
         const token = this.args.hostConfig.token || this.args.hostConfig.pvtProxyToken || "adis-ababa";
         try {
             if (!(await this.connectToProxy(remoteHost, remotePort))) {
-                if (this.args.hostConfig.type === "local") {
+                if (networkMode === "local") {
                     await this.startProxy(remoteHost, remotePort);
                     await new Promise((resolve) => setTimeout(resolve, 1000));
                     if (!(await this.connectToProxy(remoteHost, remotePort))) {
@@ -63,12 +64,12 @@ export class ProxyClient extends EventEmitter {
                         this.session.handleMsg(Stdout, `Connected to proxy on ${remoteHost}:${remotePort}`);
                     }
                 } else {
-                    this.session.handleMsg(Stderr, `Failed to connect to proxy on ${remoteHost}:${remotePort}. Please ensure the proxy is running.`);
+                    this.session.handleMsg(Stderr, `Failed to connect to proxy on ${remoteHost}:${remotePort} (network mode: ${networkMode}). Please ensure the proxy is running.`);
                     return false;
                 }
             }
         } catch (err) {
-            this.session.handleMsg(Stderr, `Failed to connect to proxy. Please ensure the proxy is running and accessible. ${err}`);
+            this.session.handleMsg(Stderr, `Failed to connect to proxy (network mode: ${networkMode}). Please ensure the proxy is running and accessible. ${err}`);
             return false;
         }
         try {
