@@ -79,8 +79,12 @@ function copy_artifact() {
 }
 
 function sync_proxy_binaries() {
+  [[ -n "${PROXY_BINDIR:-}" && "$PROXY_BINDIR" != "/" ]] || {
+    echo "Refusing to clear PROXY_BINDIR='$PROXY_BINDIR'"
+    exit 1
+  }
   mkdir -p "$PROXY_BINDIR"
-  rm -rf "$PROXY_BINDIR"/*
+  find "$PROXY_BINDIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
   cp -R "$BINDIR"/. "$PROXY_BINDIR"/
   echo "Synchronized helper binaries to: $PROXY_BINDIR"
 }

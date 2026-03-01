@@ -11,10 +11,15 @@ if [[ ! -d "$SRC_DIR" ]]; then
   exit 1
 fi
 
+[[ -n "${PROXY_DIR:-}" && "$PROXY_DIR" != "/" ]] || {
+  echo "Refusing to clear PROXY_DIR='$PROXY_DIR'"
+  exit 1
+}
+
 mkdir -p "$PROXY_DIR"
 
 # Keep proxy package binary folder as an exact mirror of the source of truth.
-rm -rf "$PROXY_DIR"/*
+find "$PROXY_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 cp -R "$SRC_DIR"/. "$PROXY_DIR"/
 
 echo "Synchronized helper binaries:"

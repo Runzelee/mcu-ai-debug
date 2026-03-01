@@ -16,7 +16,7 @@ import { EventEmitter } from "stream";
 import * as crypto from "crypto";
 import { glob, GlobOptions } from "glob";
 
-type StreamStatus = "starting" | "running" | "ready" | "timedOut" | "closed";
+type StreamStatus = "starting" | "connected" | "ready" | "timedOut" | "closed";
 
 export class PortReservedInfo {
     constructor(
@@ -408,7 +408,7 @@ export class ProxyClient extends EventEmitter {
         }
         const stream_name = portReserved.stream_id_str;
         try {
-            portReserved.status = isStarted ? "running" : "ready";
+            portReserved.status = isStarted ? "connected" : "ready";
             /*
             if (!portReserved.stream_id_str.startsWith("gdb")) {
                 // If this is not a gdb stream we open right away. For geb streams, if we open right away we will
@@ -442,7 +442,7 @@ export class ProxyClient extends EventEmitter {
         if (!ret || !ret.streamStatus || ret.streamStatus.status !== "Connected") {
             throw new Error(`Failed to start stream for stream_id ${stream_id}, stream_name ${stream_name}`);
         }
-        portReserved.status = "running";
+        portReserved.status = "connected";
     }
 
     private handleStreamClosed(stream_id: any) {
@@ -482,7 +482,7 @@ export class RemoteStream {
         this.server = net
             .createServer(async (socket) => {
                 this.clientConnections.push(socket);
-                if (this.pInfo.status !== "running") {
+                if (this.pInfo.status !== "connected") {
                     // this was deferred because gdb-streams need to wait for handshake or else the gdb-server
                     // might reject the connection. For non-gdb streams we can just start right away
                     await this.startStream(); // Force opening the stream
@@ -517,7 +517,7 @@ export class RemoteStream {
         this.proxyManager.session.handleMsg(Stdout, `==> Received data from proxy for stream ${this.pInfo.stream_id_str} (stream_id ${this.pInfo.stream_id}): '${toStr}'`);
         // Should we buffer this if there are no clients connected? For now we just drop it, but maybe we should
         // buffer it and send it when a client connects?
-        if (this.clientConnections.length === 0 || this.pInfo.status !== "running") {
+        if (this.clientConnections.length === 0 || this.pInfo.status !== "connected") {
             this.proxyManager.session.handleMsg(
                 Stdout,
                 `Buffering data from proxy for stream ${this.pInfo.stream_id_str} (stream_id ${this.pInfo.stream_id}) because there are no clients connected or stream is not running, data: '${toStr}'`,
@@ -536,11 +536,11 @@ export class RemoteStream {
     }
 
     dataFromClent(data: Buffer) {
-        if (this.pInfo.status !== "running") {
+        if (this.pInfo.status !== "connected") {
             const toStr = data.toString();
             this.proxyManager.session.handleMsg(
                 Stdout,
-                `<== Buffering data to proxy for stream ${this.pInfo.stream_id_str} (stream_id ${this.pInfo.stream_id}) because the stream is not running, data: '${toStr}'`,
+                `<== Buffering data to proxy for stream ${this.pInfo.stream_id_str} (stream_id ${this.pInfo.stream_id}) because the stream is not connected, data: '${toStr}'`,
             );
             this.toServerBuffer = Buffer.concat([this.toServerBuffer, data]);
             return;
@@ -552,8 +552,8 @@ export class RemoteStream {
         this.proxyManager
             .startStream(this.pInfo.stream_id)
             .then(() => {
-                if (this.pInfo.status !== "running") {
-                    throw new Error(`Stream ${this.pInfo.stream_id_str} is not running after startStream command`);
+                if (this.pInfo.status !== "connected") {
+                    throw new Error(`Stream ${this.pInfo.stream_id_str} is not connected after startStream command`);
                 }
                 if (this.toServerBuffer.length > 0) {
                     this.proxyManager.sendCommandBytes(this.pInfo.stream_id, this.toServerBuffer);
