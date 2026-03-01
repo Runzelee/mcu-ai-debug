@@ -199,9 +199,13 @@ pub enum ControlRequest {
     #[serde(rename = "streamStatus")]
     StreamStatus { stream_id: u8 },
 
-    /* Open the stream now that the port is ready */
+    /** Open the stream now that the port is ready */
     #[serde(rename = "startStream")]
     StartStream { stream_id: u8 },
+
+    /** Duplicate an existing stream */
+    #[serde(rename = "duplicateStream")]
+    DuplicateStream { stream_id: u8 },
 
     /** Heartbeat message to keep the connection alive */
     #[serde(rename = "heartbeat")]
@@ -268,7 +272,11 @@ pub enum ControlResponseData {
     StartGdbServer { pid: u32 },
     /** StreamStatus response: Status of a specific stream */
     #[serde(rename = "streamStatus")]
-    StreamStatus { stream_id: u8, status: StreamStatus },
+    StreamStatus {
+        stream_id: u8,
+        status: StreamStatus,
+        msg_seq: u64,
+    },
     /** Heartbeat response: Acknowledgment of heartbeat */
     #[serde(rename = "heartbeat")]
     Heartbeat,
@@ -538,6 +546,7 @@ impl ProxyServer {
                         let data = ControlResponseData::StreamStatus {
                             stream_id,
                             status: StreamStatus::Connected,
+                            msg_seq,
                         };
                         ControlResponse::success(msg_seq, Some(data))
                             .send(&mut self.stream)
@@ -626,6 +635,13 @@ impl ProxyServer {
                 eprintln!("Received StartStream request for stream_id {}", stream_id);
                 self.handle_start_stream(stream_id, msg.seq);
             }
+            ControlRequest::DuplicateStream { stream_id } => {
+                eprintln!(
+                    "Received DuplicateStream request for stream_id {}",
+                    stream_id
+                );
+                self.handle_duplicate_stream(stream_id, msg.seq);
+            }
             ControlRequest::EndSession => {
                 eprintln!("Received EndSession request, closing connection");
                 ControlResponse::success(msg.seq, None)
@@ -670,6 +686,7 @@ impl ProxyServer {
                         0
                     },
                     status,
+                    msg_seq: msg.seq,
                 };
                 ControlResponse::success(msg.seq, Some(data))
                     .send(&mut self.stream)
@@ -1011,6 +1028,44 @@ impl ProxyServer {
         } else {
             eprintln!(
                 "Received StartStream for unknown stream_id {}, ignoring",
+                stream_id
+            );
+        }
+    }
+
+    fn handle_duplicate_stream(&mut self, stream_id: u8, msg_seq: u64) {
+        if let Some(pinfo) = self.streams.get_mut(&stream_id) {
+            if pinfo.stream.is_some() {
+                let port = pinfo.port;
+                let cur_stream_id = self.next_stream_id;
+                self.next_stream_id += 1;
+                let tmp = PortInfoListner {
+                    port: port,
+                    stream_id: cur_stream_id,
+                    listener: None,
+                };
+                // We don't need to save dynamically allocated ports in self.reserved_ports because we won't be waiting on
+                // them before the gdb-server launches, but we can still push them there to keep track of them and for easier
+                // cleanup on shutdown
+                self.reserved_ports.push(tmp);
+                self.streams.insert(
+                    cur_stream_id,
+                    PortInfo {
+                        port,
+                        stream_id: cur_stream_id,
+                        stream: None,
+                    },
+                );
+                self.spawn_port_waiters(vec![(cur_stream_id, port)], true, msg_seq);
+            } else {
+                eprintln!(
+                    "Received DuplicateStream for stream_id {} which is not currently connected, ignoring",
+                    stream_id
+                );
+            }
+        } else {
+            eprintln!(
+                "Received DuplicateStream for unknown stream_id {}, ignoring",
                 stream_id
             );
         }

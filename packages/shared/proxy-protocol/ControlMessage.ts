@@ -62,6 +62,7 @@ export type ControlMessage = { seq: number } & (
     | { method: "endSession" }
     | { method: "streamStatus"; params: { stream_id: number } }
     | { method: "startStream"; params: { stream_id: number } }
+    | { method: "duplicateStream"; params: { stream_id: number } }
     | { method: "heartbeat" }
     | { method: "syncFile"; params: { relative_path: string; content: Array<number> } }
 );

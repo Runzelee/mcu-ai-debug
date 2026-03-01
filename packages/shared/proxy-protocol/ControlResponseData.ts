@@ -6,5 +6,5 @@ export type ControlResponseData =
     | { initialize: { version: string; server_launch_uid: string } }
     | { allocatePorts: { ports: Array<PortReserved> } }
     | { startGdbServer: { pid: number } }
-    | { streamStatus: { stream_id: number; status: StreamStatus } }
+    | { streamStatus: { stream_id: number; status: StreamStatus; msg_seq: number } }
     | "heartbeat";
