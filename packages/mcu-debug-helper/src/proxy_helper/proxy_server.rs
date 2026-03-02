@@ -1000,6 +1000,7 @@ impl ProxyServer {
                         }
 
                         // Start forwarding TCP → Client in THIS thread
+                        std::thread::sleep(Duration::from_millis(100)); // Small delay to ensure the proxy client thread has fully processed the PortConnected event and is ready to receive forwarded data
                         read_and_forward(stream_id, read_stream, event_tx);
                     }
                     Err(e) => {
