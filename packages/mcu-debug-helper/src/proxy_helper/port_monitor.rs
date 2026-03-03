@@ -100,9 +100,9 @@ pub fn wait_for_ports(
                 .cloned()
                 .map(|(stream_id, port)| (port, stream_id)),
         );
+        let start = std::time::Instant::now();
         let quick_interval = 200;
         let mut interval = Duration::from_millis(quick_interval);
-        let mut count = 0;
         while !port_map.is_empty() {
             match stop_rx.try_recv() {
                 Ok(_) => {
@@ -160,21 +160,27 @@ pub fn wait_for_ports(
             for port in ready_ports {
                 port_map.remove(&port);
             }
-            count += 1;
-            if count == (10 * 1000 / quick_interval) {
-                // After 10 seconds, switch to a fixed 1 second interval to avoid spamming the system with lsof/netstat calls
-                interval = Duration::from_secs(1);
-                eprintln!(
-                    "Still waiting for ports to be ready after 10 seconds, check interval {:?}s",
-                    interval.as_secs()
-                );
-            } else if count == (5 * 60 * 1000 / quick_interval) {
+
+            let elapsed = start.elapsed().as_millis();
+            let last_interval = interval;
+            if elapsed >= 5 * 60 * 1000 {
                 // After 5 minutes, switch to a 30 second interval as we may be waiting forever...but just in case
                 interval = Duration::from_secs(30);
-                eprintln!(
-                    "Still waiting for ports to be ready after 5 minutes, check interval {:?}s",
-                    interval.as_secs()
-                );
+                if interval != last_interval {
+                    eprintln!(
+                        "Still waiting for ports to be ready after 5 minutes, check interval {:?}s",
+                        interval.as_secs()
+                    );
+                }
+            } else if elapsed >= 10 * 1000 {
+                // After 10 seconds, switch to a fixed 1 second interval to avoid spamming the system with lsof/netstat calls
+                interval = Duration::from_secs(1);
+                if interval != last_interval {
+                    eprintln!(
+                    "Still waiting for ports to be ready after 10 seconds, check interval {:?}s",
+                        interval.as_secs()
+                    );
+                }
             }
             match stop_rx.recv_timeout(interval) {
                 Ok(_) => {

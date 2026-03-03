@@ -667,7 +667,7 @@ impl ProxyServer {
                 self.exit = true;
             }
             ControlRequest::Heartbeat => {
-                eprintln!("Received Heartbeat request");
+                // eprintln!("Received Heartbeat request"); // Too many. We are still logging responses. That is enough
                 ControlResponse::success(msg.seq, Some(ControlResponseData::Heartbeat))
                     .send(&mut self.stream)
                     .unwrap_or_else(|e| {
