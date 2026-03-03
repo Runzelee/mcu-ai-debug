@@ -67,6 +67,41 @@ function host_platform() {
   esac
 }
 
+function native_rust_target() {
+  local os arch
+  os=$(uname -s)
+  arch=$(uname -m)
+
+  case "$os" in
+    Darwin)
+      # On Apple Silicon, a shell may run under Rosetta and report x86_64.
+      # Detect underlying arm64 hardware and force native arm target.
+      if [[ "$(sysctl -in hw.optional.arm64 2>/dev/null || echo 0)" == "1" ]]; then
+        echo "aarch64-apple-darwin"
+      else
+        echo "x86_64-apple-darwin"
+      fi
+      ;;
+    Linux)
+      if [[ "$arch" == "aarch64" ]]; then
+        echo "aarch64-unknown-linux-gnu"
+      else
+        echo "x86_64-unknown-linux-gnu"
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+      if [[ "$arch" == "aarch64" ]]; then
+        echo "aarch64-pc-windows-msvc"
+      else
+        echo "x86_64-pc-windows-msvc"
+      fi
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
 function copy_artifact() {
   local src=$1 dest_dir=$2 dest_name=$3
   mkdir -p "$dest_dir"
@@ -107,11 +142,28 @@ if [[ "$mode" == "dev" ]]; then
   cargo test --lib proxy_server::tests::ensure_ts_exports --quiet 2>/dev/null || true
   format_ts_exports
 
-  cargo build --bin "$BIN_NAME"
+  target=$(native_rust_target)
+  if [[ -n "$target" ]]; then
+    if ! rustup target list --installed | grep -q "^${target}$"; then
+      echo "Adding rust target: $target"
+      rustup target add "$target" || true
+    fi
+    echo "Building debug helper for target: $target"
+    cargo build --bin "$BIN_NAME" --target "$target"
+    dbg_path="target/$target/debug/$BIN_NAME"
+  else
+    echo "Unknown host target, using default cargo host build"
+    cargo build --bin "$BIN_NAME"
+    dbg_path="target/debug/$BIN_NAME"
+  fi
+
   host=$(host_platform)
-  dbg_path="target/debug/$BIN_NAME"
   if [[ "$host" == win32-* ]]; then
-    dbg_path="target/debug/$BIN_NAME.exe"
+    if [[ -n "$target" ]]; then
+      dbg_path="target/$target/debug/$BIN_NAME.exe"
+    else
+      dbg_path="target/debug/$BIN_NAME.exe"
+    fi
     BIN_NAME="$BIN_NAME.exe"
   fi
 
