@@ -15,6 +15,7 @@ import { PortAllocatorSpec } from "@mcu-debug/shared/proxy-protocol/PortAllocato
 import { EventEmitter } from "stream";
 import * as crypto from "crypto";
 import { glob, GlobOptions } from "glob";
+import { isUnsafeRelativeSyncPath, resolveSyncRelativePathForFile } from "./sync-files-utils";
 
 type StreamStatus = "starting" | "connected" | "ready" | "timedOut" | "closed";
 
@@ -60,26 +61,6 @@ export class ProxyClient extends EventEmitter {
 
     public logError(message: string) {
         this.session.handleMsg(Stderr, `[proxy-client] ${message}`);
-    }
-
-    private isUnsafeRelativePath(inputPath: string): boolean {
-        if (!inputPath) {
-            return false;
-        }
-        const normalized = inputPath.replace(/\\/g, "/");
-        if (normalized.startsWith("/") || /^[a-zA-Z]:\//.test(normalized)) {
-            return true;
-        }
-        const parts = normalized.split("/").filter((segment) => segment.length > 0);
-        return parts.some((segment) => segment === "..");
-    }
-
-    private normalizeRelativePath(inputPath: string): string {
-        const normalized = path.posix.normalize(inputPath.replace(/\\/g, "/"));
-        if (normalized === ".") {
-            return "";
-        }
-        return normalized.startsWith("./") ? normalized.substring(2) : normalized;
     }
 
     async start(): Promise<boolean> {
@@ -172,7 +153,7 @@ export class ProxyClient extends EventEmitter {
                 continue;
             }
             const remotePath = file.remote ? canonicalizePath(file.remote, false) : "";
-            if (remotePath && (path.isAbsolute(remotePath) || this.isUnsafeRelativePath(remotePath))) {
+            if (remotePath && (path.isAbsolute(remotePath) || isUnsafeRelativeSyncPath(remotePath))) {
                 this.logError(`Security violation: Remote path for syncing files must be a relative path. Skipping sync for pattern ${localPattern} with remote path ${remotePath}`);
                 hadSyncFailures = true;
                 continue;
@@ -205,29 +186,8 @@ export class ProxyClient extends EventEmitter {
                         }
                         const content = Buffer.from(fs.readFileSync(localFilePath)).toJSON().data as Array<number>;
 
-                        const localRelToCwd = this.normalizeRelativePath(canonicalizePath(path.relative(cwd, localFilePath), false));
-                        const localIsUnderCwd = localRelToCwd.length > 0 && !this.isUnsafeRelativePath(localRelToCwd);
-                        const normalizedRemotePath = this.normalizeRelativePath(remotePath || "");
-                        let rPath = "";
-
-                        if (localIsUnderCwd) {
-                            const remoteBase = remoteMustBeDir && !normalizedRemotePath ? "." : normalizedRemotePath || ".";
-                            rPath = this.normalizeRelativePath(`${remoteBase}/${localRelToCwd}`);
-                        } else if (normalizedRemotePath) {
-                            // Local file is outside cwd: use explicit remote destination.
-                            // If matching multiple files, treat remote as directory.
-                            if (remoteMustBeDir) {
-                                rPath = this.normalizeRelativePath(`${normalizedRemotePath}/${path.basename(localFilePath)}`);
-                            } else {
-                                rPath = normalizedRemotePath;
-                            }
-                        } else {
-                            // Local file is outside cwd and no remote mapping provided.
-                            // Fall back to a safe filename at session-root.
-                            rPath = this.normalizeRelativePath(path.basename(localFilePath));
-                        }
-
-                        if (!rPath || path.isAbsolute(rPath) || this.isUnsafeRelativePath(rPath)) {
+                        const rPath = resolveSyncRelativePathForFile(cwd, localFilePath, remotePath || "", remoteMustBeDir);
+                        if (!rPath) {
                             this.logError(`Security violation or potential bug: Destination path for syncing files must be a relative path. Skipping sync for file ${f}`);
                             hadSyncFailures = true;
                             continue;
@@ -257,7 +217,7 @@ export class ProxyClient extends EventEmitter {
         }
 
         if (hadSyncFailures) {
-            throw new Error("syncFiles failed");
+            throw new Error("hostConfig.syncFiles failed");
         }
     }
 
