@@ -451,8 +451,6 @@ export class GDBDebugSession extends SeqDebugSession {
             const handle = this.varManager.addFrameInfo(threadId, frame.level, VariableScope.Local);
             const stackFrame = newFrame(frame, handle);
             response.body.stackFrames.push(stackFrame);
-            this.sendResponse(response);
-            return;
         };
 
         function newFrame(frame: GdbMiFrameIF, handle: number): DebugProtocol.StackFrame {
@@ -498,7 +496,6 @@ export class GDBDebugSession extends SeqDebugSession {
             this.sendResponse(response);
         } catch (e) {
             this.handleErrResponse(response, `Failed to get stack frames: ${e}`);
-            return;
         }
     }
 
