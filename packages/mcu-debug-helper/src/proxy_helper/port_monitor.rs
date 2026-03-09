@@ -163,7 +163,16 @@ pub fn wait_for_ports(
 
             let elapsed = start.elapsed().as_millis();
             let last_interval = interval;
-            if elapsed >= 5 * 60 * 1000 {
+            if elapsed >= 20 * 60 * 1000 {
+                // After 20 minutes, switch to a 5 minute interval as we may be waiting forever...but just in case
+                interval = Duration::from_secs(5 * 60);
+                if interval != last_interval {
+                    eprintln!(
+                        "Still waiting for ports to be ready after 20 minutes, check interval {:?}s",
+                        interval.as_secs()
+                    );
+                }
+            } else if elapsed >= 5 * 60 * 1000 {
                 // After 5 minutes, switch to a 30 second interval as we may be waiting forever...but just in case
                 interval = Duration::from_secs(30);
                 if interval != last_interval {

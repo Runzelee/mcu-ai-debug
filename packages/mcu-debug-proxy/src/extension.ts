@@ -20,6 +20,7 @@ import { computeProxyLaunchPolicy, ProxyHostType, resolveProxyNetworkMode, Proxy
 let childP: ChildProcess = null as any; // Placeholder for the actual child process that will run the proxy server
 let proxyPath: string = "path/to/proxy/server"; // Placeholder for the actual path to the proxy server script
 let proxyPolicy: ProxyLaunchPolicy | null = null;
+let currentLaunchResults: ProxyLaunchResults | null = null;
 let exiting = false;
 
 const nonce = generateNonce();
@@ -69,7 +70,12 @@ async function startProxyServer(policy: ProxyLaunchPolicy): Promise<ProxyLaunchR
     return ret;
 }
 
-function startProxyServerWithPolicy(): Promise<ProxyLaunchResults> {
+async function startProxyServerWithPolicy(): Promise<ProxyLaunchResults> {
+    currentLaunchResults = null;
+    currentLaunchResults = await startProxyServerWithPolicyInternal();
+    return currentLaunchResults;
+}
+function startProxyServerWithPolicyInternal(): Promise<ProxyLaunchResults> {
     return new Promise<ProxyLaunchResults>((resolve, reject) => {
         const dummyResolve = () => {
             if (!resolved) {
@@ -199,11 +205,14 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     const disposables = [
-        // Not sure if the follosing is needed. It returns the policy without starting the server, but there
-        // is no need to call this as that can be done by a local call to computeLaunchPolicy.
-        // We can remove this if we want to simplify the API, but it might be useful for testing and debugging purposes.
-        vscode.commands.registerCommand("mcu-debug-proxy.getNetworkPolicy", (hostType?: ProxyHostType) => {
-            return computeLaunchPolicy(hostType || "auto");
+        // This command allows the mcu-debug extension to retrieve the current proxy launch results, including the
+        // policy, console messages, errors, token, and server port. It will return null if the proxy server is not
+        // currently running or if the launch results are not available.
+        vscode.commands.registerCommand("mcu-debug-proxy.getProxyResults", () => {
+            if (!childP || !currentLaunchResults || !proxyPolicy || currentLaunchResults.serverPort === -1) {
+                return null;
+            }
+            return currentLaunchResults;
         }),
         // This is the main command that the mcu-debug extension will call to start the proxy server. It will return
         // the launch results, including the policy, console messages, errors, token, and server port.

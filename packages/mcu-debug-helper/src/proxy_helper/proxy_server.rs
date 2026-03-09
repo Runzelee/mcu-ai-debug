@@ -724,9 +724,11 @@ impl ProxyServer {
             );
             let mut err = false;
             let mut err_msg = String::new();
-            if token != &self.args.token {
-                err_msg = "Error: Received token does not match expected token".to_string();
-                err = true;
+            if self.args.no_token == false {
+                if token != &self.args.token {
+                    err_msg = "Error: Received token does not match expected token".to_string();
+                    err = true;
+                }
             }
             if version != CURRENT_VERSION {
                 err_msg = format!("Error: Unsupported version {}", version);
@@ -1361,6 +1363,7 @@ mod tests {
                 port_wait_mode: PortWaitMode::ConnectHold,
                 log_stderr: false,
                 log_dir: None,
+                no_token: false,
             };
             let _ = crate::proxy_helper::run::run(args);
         });

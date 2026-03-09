@@ -48,7 +48,7 @@ function computeProxyLaunchPolicy(mode) {
     if (mode === "auto-dev-container") {
         return {
             mode,
-            bindHost: "0.0.0.0",
+            bindHost: "127.0.0.1",
             proxyHostForDA: "host.docker.internal",
             reason: "Container reaches host through host.docker.internal",
         };

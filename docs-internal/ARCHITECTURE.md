@@ -97,11 +97,11 @@ Since JSON is "heavy" for raw byte streams like RTT, the most efficient way to d
 #### The Binary Frame (The Funnel)
 
 To keep it "Zero-Buffering," every packet through the SSH tunnel should have a small header:
-| Field              | Size    | Description                                      |
-| :----------------- | :------ | :----------------------------------------------- |
-| **Stream ID**      | 1 Byte  | `0`: Control, `1`: GDB, `2`: SWO, `3`: RTT, etc. |
-| **Payload Length** | 4 Bytes | UInt32 (Little Endian)                           |
-| **Payload**        | N Bytes | The raw data (JSON string or raw bytes)          |
+| Field              | Size    | Description                                               |
+| :----------------- | :------ | :-------------------------------------------------------- |
+| **Stream ID**      | 1 Byte  | `0`: Control, `1`: stdout, `2`: stderr, `3`: GDB IO, etc. |
+| **Payload Length** | 4 Bytes | UInt32 (Little Endian)                                    |
+| **Payload**        | N Bytes | The raw data (JSON string or raw bytes)                   |
 
 ---
 
@@ -188,7 +188,7 @@ The Debug Adapter sends this every 30 seconds if the line is quiet. If the Probe
 
 ### 4. Handling Binary Streams (The "Raw" Mode)
 
-For **GDB**, **SWO**, and **RTT**, we should skip JSON entirely once the stream is established to avoid the "Base64 Tax" (which adds 33% overhead) and CPU overhead.
+For **GDB**, **SWO**, and **RTT** (any stream with stream-id >= 3), we should skip JSON entirely once the stream is established to avoid the "Base64 Tax" (which adds 33% overhead) and CPU overhead.
 
 1. **Control Message:** `[ID:0][Len:124][{"jsonrpc":...}]`
 2. **GDB Data:** `[ID:1][Len:4096][...raw binary bytes...]`
@@ -381,7 +381,7 @@ When present in `launch.json`, enables remote proxy mode. When absent, everythin
         // Optional: files to stage from workspace to host
         "syncFiles": [
             "*.cfg",                     // glob patterns, resolved relative to ${workspaceFolder}
-            "scripts/flash.sh"
+            "scripts/flash.sh"           // While files are copied, permissions are not for security reasons. so scripts may not be useful
         ]
     }
 }

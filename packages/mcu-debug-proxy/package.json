@@ -28,7 +28,7 @@
     "onDebugResolve:cortex-debug",
     "onDebugResolve:mcu-debug",
     "onStartupFinished",
-    "onCommand:mcu-debug-proxy.getNetworkPolicy",
+    "onCommand:mcu-debug-proxy.getProxyResults",
     "onCommand:mcu-debug-proxy.startProxyServer"
   ],
   "categories": [

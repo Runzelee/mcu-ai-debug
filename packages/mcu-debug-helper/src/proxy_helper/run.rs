@@ -61,6 +61,10 @@ pub struct ProxyArgs {
     #[arg(short = 't', long = "token", default_value = "adis-ababa")]
     pub token: String,
 
+    /// If true, do not include the token in the discovery JSON output (for security through obscurity)
+    #[arg(long = "no-token", default_value_t = false)]
+    pub no_token: bool,
+
     /// Enable debug output
     #[arg(short = 'd', long = "debug", default_value_t = false)]
     pub debug: bool,
@@ -193,10 +197,9 @@ pub fn run(args: ProxyArgs) -> Result<()> {
 
     // Print Discovery JSON to stdout: {"status": "ready", "port": <actual_port>, "pid": <pid>}
     println!(
-        "{{\"status\": \"ready\", \"port\": {}, \"pid\": {}, \"token\": \"{}\"}}",
+        "{{\"status\": \"ready\", \"port\": {}, \"pid\": {}}}",
         listener.local_addr()?.port(),
-        std::process::id(),
-        args.token
+        std::process::id()
     );
     std::io::stdout().flush()?;
 
@@ -228,6 +231,7 @@ pub fn run(args: ProxyArgs) -> Result<()> {
                     port_wait_mode: args.port_wait_mode,
                     log_stderr: args.log_stderr,
                     log_dir: args.log_dir.clone(),
+                    no_token: args.no_token,
                 };
                 let handle = thread::spawn(move || {
                     let mut new_client = ProxyServer::new(args_clone, stream);
@@ -261,6 +265,7 @@ mod tests {
             port_wait_mode: PortWaitMode::ConnectHold,
             log_stderr: false,
             log_dir: Some(temp.path().to_string_lossy().to_string()),
+            no_token: false,
         };
 
         let _log_handle = init_logging(&args);

@@ -18,18 +18,42 @@ import {
 } from "../adapter/servers/common";
 import { CDebugChainedSessionItem, CDebugSession } from "./cortex_debug_session";
 import * as path from "path";
+import { resolve } from "dns/promises";
 
 let currentPolicy: ProxyLaunchPolicy | null = null;
 let proxyLaunchResults: ProxyLaunchResults | null = null;
-export function launchProxyServer(policy: ProxyLaunchPolicy): Promise<void> {
-    return new Promise<void>((resolve) => {
+export async function launchProxyServer(policy: ProxyLaunchPolicy): Promise<ProxyLaunchResults | null> {
+    try {
         const command = "mcu-debug-proxy.startProxyServer";
-        vscode.commands.executeCommand<ProxyLaunchResults>(command, policy).then((value: ProxyLaunchResults) => {
-            proxyLaunchResults = value;
-            currentPolicy = policy;
-            resolve();
-        });
-    });
+        const value = await vscode.commands.executeCommand<ProxyLaunchResults | null>(command, policy);
+        proxyLaunchResults = value;
+        currentPolicy = policy;
+        return value;
+    } catch (error) {
+        proxyLaunchResults = null;
+        currentPolicy = null;
+        vscode.window.showErrorMessage(`Failed to launch proxy server: ${error}, mcu-debug-proxy extension not activated? Please try again. Report this problem if it continues to happen`);
+        return null;
+    }
+}
+
+export async function getCurrentProxyLaunchResults(policy: ProxyLaunchPolicy): Promise<ProxyLaunchResults | null> {
+    const command = "mcu-debug-proxy.getProxyResults";
+    try {
+        const value = await vscode.commands.executeCommand<ProxyLaunchResults | null>(command);
+        if (!value || !value.serverPort || value.serverPort <= 0) {
+            proxyLaunchResults = null;
+            return null;
+        }
+        if (value.serverPort !== proxyLaunchResults?.serverPort || value.token !== proxyLaunchResults?.token || value.policy.bindHost !== proxyLaunchResults?.policy.bindHost) {
+            proxyLaunchResults = null;
+            return null;
+        }
+        return value;
+    } catch {
+        vscode.window.showErrorMessage(`Failed to get current proxy launch results. mcu-debug-proxy extension not activated? Please try again. Report this problem if it continues to happen`);
+        return null;
+    }
 }
 
 type ConfigOptions = vscode.DebugConfiguration & ConfigurationArguments;
@@ -300,12 +324,13 @@ export class CortexDebugConfigurationProvider implements vscode.DebugConfigurati
                 if (!config.hostConfig.pvtProxyHost) {
                     config.hostConfig.pvtProxyHost = resolvedProxyHost;
                 }
-                if (!currentPolicy || currentPolicy.bindHost !== policy.bindHost) {
-                    try {
-                        await awaitWithTimeout(launchProxyServer(policy), 10000);
-                    } catch (error) {
-                        vscode.window.showErrorMessage(`mcu-debug-proxy failed to launch proxy server: ${error}`);
-                        throw error;
+                let current = await awaitWithTimeout(getCurrentProxyLaunchResults(policy), 10000);
+                if (!current || !currentPolicy || currentPolicy.bindHost !== policy.bindHost) {
+                    current = await awaitWithTimeout(launchProxyServer(policy), 10000);
+                    if (!current) {
+                        throw new Error(
+                            "Proxy server did not launch in a timely manner or had an error. mcu-debug-proxy extension not activated?. Please try again. Report this problem if it continues to happen",
+                        );
                     }
                 }
                 if (proxyLaunchResults?.serverPort == null || proxyLaunchResults.serverPort <= 0) {

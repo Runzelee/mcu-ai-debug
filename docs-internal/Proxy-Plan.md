@@ -91,10 +91,10 @@ The **DA** connects to the Probe Agent via TCP and speaks the Funnel Protocol. T
 
 The extension is split into two separate VS Code extensions with fixed `extensionKind`:
 
-| Extension      | `extensionKind` | Runs on              | Responsibilities                                      |
-| -------------- | --------------- | -------------------- | ----------------------------------------------------- |
-| `mcu-debug-ui` | `["ui"]`        | Always local machine | Proxy lifecycle, SSH tunneling, IPC to workspace side |
-| `mcu-debug`    | `["workspace"]` | Always remote side   | Debug Adapter, GDB, source/ELF handling               |
+| Extension         | `extensionKind` | Runs on              | Responsibilities                                      |
+| ----------------- | --------------- | -------------------- | ----------------------------------------------------- |
+| `mcu-debug-proxy` | `["ui"]`        | Always local machine | Proxy lifecycle, SSH tunneling, IPC to workspace side |
+| `mcu-debug`       | `["workspace"]` | Always remote side   | Debug Adapter, GDB, source/ELF handling               |
 
 Communication between them uses `vscode.commands.executeCommand`, which VS Code's remote protocol proxies transparently across the boundary — no raw sockets or pipes needed at the extension level.
 
@@ -104,7 +104,7 @@ Communication between them uses `vscode.commands.executeCommand`, which VS Code'
 // UI extension (local) registers when proxy is ready:
 // token was generated BEFORE spawning the agent and passed as --token <value>;
 // it is not read back from Discovery JSON.
-vscode.commands.registerCommand('mcu-debug-ui.getProxyEndpoint', () => ({
+vscode.commands.registerCommand('mcu-debug-proxy.startProxyServer', () => ({
     host: resolvedProxyHost,   // e.g. '127.0.0.1', 'host.docker.internal', etc.
     port: discoveredPort,      // OS-assigned port from Discovery JSON
     token: knownToken,         // Set by launcher; never extracted from agent stdout
@@ -112,7 +112,7 @@ vscode.commands.registerCommand('mcu-debug-ui.getProxyEndpoint', () => ({
 
 // Workspace extension (remote) calls before debug session:
 const endpoint = await vscode.commands.executeCommand<ProxyEndpoint>(
-    'mcu-debug-ui.getProxyEndpoint'
+    'mcu-debug-proxy.startProxyServer'
 );
 // Then injects into ConfigurationArguments as pvtProxyHost / pvtProxyPort / pvtProxyToken
 // so the DA (which has no VS Code APIs) can connect without knowing about VS Code at all.
@@ -133,12 +133,14 @@ Whoever starts the Probe Agent decides the token and passes it as `--token <valu
 
 ### Token modes
 
-| How agent is started                                | Token source                                                                              | Agent behavior                                                                                  |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Extension-launched (per-session or VS Code session) | Extension generates `crypto.randomBytes(16).toString('hex')`, passes as `--token <value>` | Validates token on every `initialize` from the DA                                               |
-| Manually launched, explicit token                   | User passes `--token mytoken`                                                             | Validates token; writes value to `~/.mcu-debug/agent.token` for the extension to read           |
-| Manually launched, no flag                          | Agent generates a random token itself                                                     | Validates token; writes generated value to `~/.mcu-debug/agent.token` for the extension to read |
-| Manually launched, `--no-token`                     | User explicitly opts out                                                                  | Skips token validation entirely; extension connects without a token                             |
+| How agent is started                                | Token source                                                                              | Agent behavior                                                                                      |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Extension-launched (per-session or VS Code session) | Extension generates `crypto.randomBytes(16).toString('hex')`, passes as `--token <value>` | Validates token on every `initialize` from the DA                                                   |
+| Manually launched, explicit token                   | User passes `--token mytoken`                                                             | Validates token; ~~writes value to `~/.mcu-debug/agent.token` for the extension to read~~           |
+| ~~Manually launched, no flag                        | Agent generates a random token, writes to stdout as part of json output itself            | Validates token; ~~writes generated value to `~/.mcu-debug/agent.token` for the extension to read~~ |
+| Manually launched, `--no-token`                     | User explicitly opts out                                                                  | Skips token validation entirely; extension connects without a token                                 |
+
+Issue: Writing to ~/.mcu-debug/agent.token may not work because the home directories may be in different OS instances and may not be a shared directory. For all such instances the launch.json contains a token override.
 
 The **token file** (`~/.mcu-debug/agent.token`) is the handshake mechanism for daemon mode. The extension reads it via direct file read (`auto`) or `ssh cat ~/.mcu-debug/agent.token` (`ssh` type) after the agent is confirmed running. This requires no out-of-band communication and no user configuration in the common case.
 
@@ -302,15 +304,15 @@ The DA receives all connection info as private fields injected by the UI extensi
 
 Single TCP connection between DA and Proxy. Binary framing:
 
-| Field          | Size    | Description                                                  |
-| -------------- | ------- | ------------------------------------------------------------ |
-| Stream ID      | 1 byte  | `0` = Control (JSON-RPC), `1` = GDB, `2` = SWO, `3` = RTT, … |
-| Payload Length | 4 bytes | UInt32 little-endian                                         |
-| Payload        | N bytes | JSON string (control) or raw bytes (data streams)            |
+| Field          | Size    | Description                                                                   |
+| -------------- | ------- | ----------------------------------------------------------------------------- |
+| Stream ID      | 1 byte  | `0` = Control (JSON-RPC), `1` = stdout, `2` = stderr, `3` = GDB, `4` = RTT, … |
+| Payload Length | 4 bytes | UInt32 little-endian                                                          |
+| Payload        | N bytes | JSON string (control) or raw bytes (data streams)                             |
 
-Control channel (Stream ID 0) uses JSON-RPC 2.0 for: `initialize`, `allocatePorts`, `stageFiles`, `launchServer`, `endSession`, `heartbeat`, `streamStatus`.
+Control channel (Stream ID 0) uses JSON-RPC 2.0 for: `initialize`, `allocatePorts`, `stageFiles`, `launchServer`, `endSession`, `heartbeat`, `streamStatus`. Stream IDs 1/2 are for stdout/stderr of the gdb-server that will be launched. TBD: Steam 1 will be the `stdin` for the gdb-server.
 
-Data channels (Stream IDs 1+) carry raw bytes with zero interpretation — the DA and gdb-server speak their own protocols through the tube.
+Data channels (Stream IDs 3+) carry raw bytes with zero interpretation — the DA and gdb-server speak their own protocols through the tube. The actually stream-ids are dictated by the client and the order in which they appear. Only Control 0, 1 and 2 are special. All streams are bindirectional even if there is no interest in data from a certain direction
 
 See `ARCHITECTURE.md` for full packet format details and fragmentation handling.
 
@@ -326,7 +328,7 @@ See `ARCHITECTURE.md` for full packet format details and fragmentation handling.
 
 ### Phase 2 — `auto` type: UI extension integration
 - UI extension spawns proxy on activation, reads Discovery JSON
-- Registers `mcu-debug-ui.getProxyEndpoint` command
+- Registers `mcu-debug-proxy.startProxyServer` command
 - Workspace extension injects `pvtProxy*` fields before debug session
 - Host resolution from `vscode.env.remoteName`
 - Test: Local, WSL Mirrored, Dev Container
