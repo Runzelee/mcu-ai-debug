@@ -1531,11 +1531,11 @@ export class VariableManager {
                 VariableManager.setMemoryReference(response.body as any, value);
                 await this.setVarProps(container.gdbInstance, newVar, isClientVSCode);
                 const protocolVar = await container.toProtocolVariable(newVar);
-                (response.body as any).variableObject = protocolVar;
                 response.body = {
                     result: protocolVar.value,
                     variablesReference: newVar.variablesReference,
                 };
+                (response.body as any).variableObject = protocolVar;
                 return;
             } else {
                 // Update existing variable
@@ -1550,11 +1550,11 @@ export class VariableManager {
                 }
                 VariableManager.setMemoryReference(response.body as any, existingVar.value);
                 const protocolVar = await container.toProtocolVariable(existingVar);
-                (response.body as any).variableObject = protocolVar;
                 response.body = {
                     result: protocolVar.value,
                     variablesReference: existingVar.variablesReference,
                 };
+                (response.body as any).variableObject = protocolVar;
                 return;
             }
         } catch (e) {
