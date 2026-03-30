@@ -58,6 +58,9 @@ coverage.txt
 coverage.html
 *.coverprofile
 
+# Do not commit this generated file with the current commit hash, as it will change with every commit and cause unnecessary diffs
+packages/mcu-debug/src/commit-hash.ts
+
 # Go vendor directory (if using vendor instead of modules)
 vendor/
 
