@@ -6,7 +6,9 @@
       "Bash(cargo test:*)",
       "Bash(npm run compile:*)",
       "Bash(cargo run:*)",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(bash scripts/build-binaries.sh prod)",
+      "Bash(wait)"
     ]
   }
 }

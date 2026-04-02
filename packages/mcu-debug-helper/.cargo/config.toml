@@ -11,19 +11,12 @@ TS_RS_LARGE_INT = "number"
 
 [target.aarch64-unknown-linux-musl]
 linker = "aarch64-unknown-linux-musl-gcc"
+# rustc handles stripping internally; no external llvm-strip needed for cross-compilation
+rustflags = ["-C", "strip=symbols"]
 
 [target.x86_64-unknown-linux-musl]
 linker = "x86_64-unknown-linux-musl-gcc"
-
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-unknown-linux-gnu-gcc"
-# Note: Full static linking on Linux with glibc is problematic (getaddrinfo, NSS).
-# For truly static Linux binaries, use musl targets instead.
-
-[target.x86_64-unknown-linux-gnu]
-linker = "x86_64-unknown-linux-gnu-gcc"
-# Note: Full static linking on Linux with glibc is problematic (getaddrinfo, NSS).
-# For truly static Linux binaries, use musl targets instead.
+rustflags = ["-C", "strip=symbols"]
 
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"

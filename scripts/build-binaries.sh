@@ -124,14 +124,6 @@ function sync_proxy_binaries() {
   echo "Synchronized helper binaries to: $PROXY_BINDIR"
 }
 
-function has_cross() {
-  command -v cross >/dev/null 2>&1
-}
-
-function has_container_runtime() {
-  command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1
-}
-
 if [[ "$mode" == "dev" ]]; then
   echo "Dev build: building for host platform (debug)"
   cd "$RUST_DIR"
@@ -177,27 +169,36 @@ fi
 
 if [[ "$mode" == "prod" ]]; then
   echo "Production build: release builds for multiple targets"
-  cd "$RUST_DIR"
 
-  # CI guard: if cross exists, require a container runtime so builds don't silently
-  # downgrade to host cargo fallback in automated environments.
-  if [[ "${CI:-}" == "true" ]] && has_cross && ! has_container_runtime; then
-    echo "Error: CI requires container runtime when 'cross' is installed."
-    echo "Install Docker or Podman, or remove/disable cross in this CI environment."
+  # All cross-compilation toolchains (messense MUSL, mingw-w64) are macOS-only
+  # Homebrew packages. Production builds must run on macOS.
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "Error: production builds are only supported on macOS."
+    echo "All cross-compilation toolchains (messense MUSL, mingw-w64) are installed via Homebrew."
     exit 1
   fi
 
-  # cross >=0.2.5 pre-installs the Linux x86_64 host toolchain before launching its
-  # Docker container (the container runs x86_64 Linux and needs that toolchain).
-  # On macOS, rustup refuses the install without --force-non-host because the
-  # toolchain can't execute on macOS — but it runs fine inside the Docker container.
-  # Pre-install it here so cross doesn't fail at startup.
-  if [[ "$(uname -s)" == "Darwin" ]] && has_cross && has_container_runtime; then
-    linux_host_tc="stable-x86_64-unknown-linux-gnu"
-    if ! rustup toolchain list 2>/dev/null | grep -q "^${linux_host_tc}"; then
-      echo "Pre-installing cross container toolchain (${linux_host_tc}) with --force-non-host..."
-      rustup toolchain add "$linux_host_tc" --profile minimal --force-non-host || true
-    fi
+  cd "$RUST_DIR"
+
+  # Verify all required cross-compilation toolchains are present before starting.
+  # Install with:
+  #   brew tap messense/macos-cross-toolchains
+  #   brew install x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+  #   brew install mingw-w64
+  missing=()
+  command -v x86_64-unknown-linux-musl-gcc  >/dev/null 2>&1 || missing+=("x86_64-unknown-linux-musl-gcc  (brew install x86_64-unknown-linux-musl)")
+  command -v aarch64-unknown-linux-musl-gcc >/dev/null 2>&1 || missing+=("aarch64-unknown-linux-musl-gcc (brew install aarch64-unknown-linux-musl)")
+  command -v x86_64-w64-mingw32-gcc         >/dev/null 2>&1 || missing+=("x86_64-w64-mingw32-gcc         (brew install mingw-w64)")
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "Error: missing required cross-compilation toolchains:"
+    for m in "${missing[@]}"; do
+      echo "  - $m"
+    done
+    echo ""
+    echo "On macOS, install all prerequisites with:"
+    echo "  brew tap messense/macos-cross-toolchains"
+    echo "  brew install x86_64-unknown-linux-musl aarch64-unknown-linux-musl mingw-w64"
+    exit 1
   fi
 
   # Generate TypeScript exports via ts_rs (requires test execution in v12.0+)
@@ -207,7 +208,7 @@ if [[ "$mode" == "prod" ]]; then
   format_ts_exports
 
   # platform|target_triple|exe_ext
-  # Linux targets intentionally use MUSL to produce static-friendly binaries.
+  # Linux targets use MUSL for fully static binaries.
   # Note: aarch64-pc-windows-gnu not yet in stable Rust, omitted for now
   targets=(
     "darwin-arm64|aarch64-apple-darwin|"
@@ -219,35 +220,15 @@ if [[ "$mode" == "prod" ]]; then
 
   for entry in "${targets[@]}"; do
     IFS='|' read -r platform triple ext <<< "$entry"
-    printf "\nBuilding target: %s (platform: %s)" "$triple" "$platform"
+    printf "\nBuilding target: %s (platform: %s)\n" "$triple" "$platform"
 
-    # Apple Darwin targets require the macOS SDK and can only be built on macOS.
-    if [[ "$triple" == *"-apple-darwin" ]] && [[ "$(uname -s)" != "Darwin" ]]; then
-      echo " — skipping (Apple Darwin targets require a macOS host)"
-      continue
-    fi
-
-    builder="cargo"
-    if [[ "$triple" != *"-apple-darwin" ]] && has_cross && has_container_runtime; then
-      builder="cross"
-    fi
-    echo ""
-    echo "Using builder: $builder"
-
-    # Ensure target installed
-    if [[ "$builder" == "cargo" ]] && ! rustup target list --installed | grep -q "^${triple}$"; then
+    # Ensure rustup target is installed
+    if ! rustup target list --installed | grep -q "^${triple}$"; then
       echo "Adding rust target: $triple"
       rustup target add "$triple" || true
     fi
 
-    # Build for target. Prefer `cross` for non-Darwin targets when available.
-    if [[ "$builder" == "cross" ]]; then
-      build_cmd=(cross build --release --bin "$BIN_NAME" --target "$triple")
-    else
-      build_cmd=(cargo build --release --bin "$BIN_NAME" --target "$triple")
-    fi
-
-    if "${build_cmd[@]}"; then
+    if cargo build --release --bin "$BIN_NAME" --target "$triple"; then
       artifact="target/$triple/release/$BIN_NAME$ext"
       dest_dir="$BINDIR/$platform"
       dest_name="$BIN_NAME$ext"
@@ -257,12 +238,8 @@ if [[ "$mode" == "prod" ]]; then
         echo "Expected artifact not found: $artifact"
       fi
     else
-      echo "$builder build failed for $triple."
-      if [[ "$builder" == "cross" ]]; then
-        echo "Make sure Docker/Podman is available for cross container builds."
-      else
-        echo "Consider installing 'cross' (cargo install cross --locked) or ensure native toolchain/linker availability."
-      fi
+      echo "cargo build failed for $triple — aborting."
+      exit 1
     fi
   done
 
