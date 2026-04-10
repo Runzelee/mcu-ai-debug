@@ -72,6 +72,7 @@ export class ProxyClient extends EventEmitter {
         const remoteHost = this.args.hostConfig.pvtProxyHost || "127.0.0.1";
         const remotePort = this.args.hostConfig.pvtProxyPort || 4567;
         const token = this.args.hostConfig.token || this.args.hostConfig.pvtProxyToken || "adis-ababa";
+        this.logInfo(`Starting proxy client with network mode: ${networkMode}, remote host: ${remoteHost}, remote port: ${remotePort}, token: ${token}`);
         try {
             if (!(await this.connectToProxy(remoteHost, remotePort))) {
                 this.logError(`Failed to connect to proxy on ${remoteHost}:${remotePort} (network mode: ${networkMode}). Please ensure the proxy is running.`);
@@ -144,6 +145,7 @@ export class ProxyClient extends EventEmitter {
         const maxFiles = 20; // Limit the number of files to sync to prevent abuse and performance issues
         let hitMaxFiles = false;
         let hadSyncFailures = false;
+        const maxFileSize = 10 * 1024 * 1024; // 10 MB limit for syncing files, we don't want to accidentally try to sync huge files
         for (const file of syncFiles) {
             if (hitMaxFiles) {
                 break;
@@ -178,8 +180,8 @@ export class ProxyClient extends EventEmitter {
                             hadSyncFailures = true;
                             continue;
                         }
-                        if (stats.size > 100 * 1024) {
-                            // 100 KB limit for syncing files, we don't want to accidentally try to sync huge files
+                        if (stats.size > maxFileSize) {
+                            // 10 MB limit for syncing files, we don't want to accidentally try to sync huge files
                             this.logError(`File ${f} is too large to sync (${stats.size} bytes), skipping`);
                             hadSyncFailures = true;
                             continue;

@@ -3,9 +3,8 @@
   "tasks": [
     {
       "label": "watch",
-      "dependsOn": [
-        "npm: watch"
-      ],
+      "type": "shell",
+      "command": "test -d /workspaces && echo 'Skipping watch: running in container' || npm run watch",
       "presentation": {
         "reveal": "never"
       },

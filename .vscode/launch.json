@@ -19,7 +19,41 @@
       		// "preLaunchTask": "npm: compile"
     	},
 		{
+			"name": "Launch Extensions (Container)",
+			"type": "extensionHost",
+			"request": "launch",
+			"runtimeExecutable": "${execPath}",
+			"args": [
+				"--extensionDevelopmentPath=${workspaceFolder}/packages/mcu-debug",
+				"--extensionDevelopmentPath=${workspaceFolder}/packages/mcu-debug-proxy"
+			],
+			"sourceMaps": true,
+			"outFiles": [
+				"${workspaceFolder}/packages/mcu-debug/dist/*.js",
+				"${workspaceFolder}/packages/mcu-debug-proxy/dist/*.js"
+			],
+      		// "preLaunchTask": "npm: compile"
+    	},
+		{
 			"name": "Debug Server",
+			"type": "node",
+			"request": "launch",
+			"runtimeArgs": [ "--nolazy", "--trace-warnings"],//, "--unhandled-rejections=strict" ],
+			"program": "${workspaceFolder}/packages/mcu-debug/dist/adapter.js",
+			"stopOnEntry": false,
+			"args": [ "--server=4721" ],
+			"env": {
+				"RUST_BACKTRACE": "1",
+				"PROD_MCU_DEBUG_HELPER": "0"
+			},
+			"sourceMaps": true,
+			"outFiles": [
+				"${workspaceFolder}/packages/mcu-debug/dist/*.js",
+			],
+      		// "preLaunchTask": "npm: compile"
+		},
+		{
+			"name": "Debug Server (Container)",
 			"type": "node",
 			"request": "launch",
 			"runtimeArgs": [ "--nolazy", "--trace-warnings"],//, "--unhandled-rejections=strict" ],
@@ -79,6 +113,10 @@
 			"name": "Extensions + Debug Server",
 			"configurations": ["Launch Extensions (Single Host)", "Debug Server"],
       		"preLaunchTask": "compile"
+		},
+		{
+			"name": "Extensions + Debug Server (Container)",
+			"configurations": ["Launch Extensions (Container)", "Debug Server (Container)"]
 		}
 	]
 }

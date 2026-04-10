@@ -828,7 +828,9 @@ export async function activate(context: vscode.ExtensionContext) {
     try {
         Reporting.activateTelemetry(context);
         MCUDebugChannel.createDebugChannel();
-        MCUDebugChannel.debugMessage("Starting mcu-debug extension.");
+        const packageJson = context.extension.packageJSON;
+        const version = packageJson.version || "unknown";
+        MCUDebugChannel.debugMessage(`Starting mcu-debug extension. Version = ${version}, Path = ${context.extensionPath}, PID=${process.pid}`);
     } catch (_e) {
         /* empty */
     }

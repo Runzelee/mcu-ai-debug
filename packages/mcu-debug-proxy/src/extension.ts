@@ -18,6 +18,62 @@ import { ChildProcess, spawn } from "node:child_process";
 import { computeProxyLaunchPolicy, ProxyHostType, resolveProxyNetworkMode, ProxyLaunchPolicy, ProxyLaunchResults } from "@mcu-debug/shared";
 
 let childP: ChildProcess = null as any; // Placeholder for the actual child process that will run the proxy server
+
+/**
+ * Returns true if the binary at filePath is a native executable for the
+ * given platform and CPU architecture. Prevents running a macOS arm64 dev
+ * build on a Linux x64 host (container, WSL, etc.) when the unqualified
+ * bin/<name> shortcut is present alongside the platform-specific binaries.
+ *
+ * Same logic as DebugHelper.binaryMatchesPlatform in adapter/helper.ts.
+ */
+function binaryMatchesPlatform(filePath: string, platform: NodeJS.Platform, arch: string): boolean {
+    try {
+        const fd = fs.openSync(filePath, "r");
+        const buf = Buffer.alloc(20);
+        fs.readSync(fd, buf, 0, 20, 0);
+        fs.closeSync(fd);
+
+        // ELF (Linux)
+        if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) {
+            if (platform !== "linux") {
+                return false;
+            }
+            const machine = buf.readUInt16LE(18);
+            if (arch === "x64") {
+                return machine === 0x003e;
+            } // EM_X86_64
+            if (arch === "arm64") {
+                return machine === 0x00b7;
+            } // EM_AARCH64
+            return false;
+        }
+
+        // Mach-O 64-bit little-endian (macOS)
+        if (buf[0] === 0xcf && buf[1] === 0xfa && buf[2] === 0xed && buf[3] === 0xfe) {
+            if (platform !== "darwin") {
+                return false;
+            }
+            const cputype = buf.readUInt32LE(4);
+            if (arch === "x64") {
+                return cputype === 0x01000007;
+            } // CPU_TYPE_X86_64
+            if (arch === "arm64") {
+                return cputype === 0x0100000c;
+            } // CPU_TYPE_ARM64
+            return false;
+        }
+
+        // PE (Windows) — MZ header
+        if (buf[0] === 0x4d && buf[1] === 0x5a) {
+            return platform === "win32";
+        }
+
+        return false; // Unrecognised format — treat as incompatible
+    } catch {
+        return false;
+    }
+}
 let proxyPath: string = "path/to/proxy/server"; // Placeholder for the actual path to the proxy server script
 let proxyPolicy: ProxyLaunchPolicy | null = null;
 let currentLaunchResults: ProxyLaunchResults | null = null;
@@ -192,8 +248,10 @@ export function activate(context: vscode.ExtensionContext) {
     console.log("[mcu-debug-proxy] Activating MCU Debug Proxy extension");
     const platform = process.platform;
     const exeName = "mcu-debug-helper" + (platform === "win32" ? ".exe" : "");
-    proxyPath = context.asAbsolutePath(`bin/${exeName}`);
-    if (!fs.existsSync(proxyPath)) {
+    const devPath = context.asAbsolutePath(`bin/${exeName}`);
+    if (fs.existsSync(devPath) && binaryMatchesPlatform(devPath, platform, process.arch)) {
+        proxyPath = devPath;
+    } else {
         proxyPath = context.asAbsolutePath(`bin/${platform}-${process.arch}/${exeName}`);
         if (!fs.existsSync(proxyPath)) {
             console.error(`[mcu-debug-proxy] Proxy server executable not found at ${proxyPath}`);

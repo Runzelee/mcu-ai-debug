@@ -446,6 +446,10 @@ module.exports = {
                     "Do NOT commit this value to source control — use VS Code user settings or a secrets manager.",
             },
         },
+        default: {
+            enabled: true,
+            type: "auto",
+        },
     },
     rttConfig: {
         type: "object",
