@@ -21,7 +21,7 @@
     "url": "git+https://github.com/mcu-debug/mcu-debug.git"
   },
   "license": "Apache-2.0",
-  "author": "Haneef Mohammed <haneefdm@gmail.com>",
+  "author": "Runze Lee <lhx060906@gmail.com>",
   "extensionKind": [
     "ui"
   ],
@@ -36,7 +36,7 @@
     "Other"
   ],
   "engines": {
-    "vscode": "^1.108.0"
+    "vscode": "^1.80.0"
   },
   "type": "commonjs",
   "main": "./dist/extension.js",
@@ -55,7 +55,7 @@
     "@types/node": "^25.0.3",
     "@types/proper-lockfile": "^4.1.4",
     "@types/tmp": "^0.2.6",
-    "@types/vscode": "^1.107.0",
+    "@types/vscode": "^1.80.0",
     "@vscode/debugadapter": "^1.68.0",
     "@vscode/debugprotocol": "^1.68.0",
     "esbuild": "^0.27.2",

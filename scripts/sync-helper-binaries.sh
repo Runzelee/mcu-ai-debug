@@ -16,11 +16,9 @@ fi
   exit 1
 }
 
-mkdir -p "$PROXY_DIR"
-
-# Keep proxy package binary folder as an exact mirror of the source of truth.
-find "$PROXY_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-cp -R "$SRC_DIR"/. "$PROXY_DIR"/
+# Clean and sync
+rm -rf "$PROXY_DIR"
+cp -R "$SRC_DIR" "$PROXY_DIR"
 
 echo "Synchronized helper binaries:"
 echo "  source: $SRC_DIR"

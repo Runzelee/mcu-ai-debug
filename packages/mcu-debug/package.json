@@ -1,10 +1,10 @@
 {
-  "name": "mcu-debug",
+  "name": "mcu-debug-ai",
   "publisher": "mcu-debug",
   "version": "0.1.1",
   "preview": true,
   "description": "A debugger and debug adapter for MCUs",
-  "displayName": "MCU-Debug",
+  "displayName": "MCU-Debug-AI",
   "keywords": [
     "MCU",
     "Cortex-Debug",
@@ -22,7 +22,7 @@
     "url": "git+https://github.com/mcu-debug/mcu-debug.git"
   },
   "license": "MIT AND Apache-2.0",
-  "author": "Haneef Mohammed <haneefdm@gmail.com>",
+  "author": "Runze Lee <lhx060906@gmail.com>",
   "extensionKind": [
     "workspace"
   ],
@@ -36,7 +36,7 @@
     "Debuggers"
   ],
   "engines": {
-    "vscode": "^1.108.1"
+    "vscode": "^1.80.0"
   },
   "type": "commonjs",
   "main": "./dist/extension.js",
@@ -3660,7 +3660,7 @@
     "@types/node": "^25.0.9",
     "@types/proper-lockfile": "^4.1.4",
     "@types/tmp": "^0.2.6",
-    "@types/vscode": "^1.108.1",
+    "@types/vscode": "^1.80.0",
     "@vscode/debugadapter": "^1.68.0",
     "@vscode/debugprotocol": "^1.68.0",
     "@vscode/extension-telemetry": "^1.2.0",

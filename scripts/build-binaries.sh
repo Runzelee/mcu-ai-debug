@@ -167,39 +167,81 @@ if [[ "$mode" == "dev" ]]; then
   exit 0
 fi
 
+if [[ "$mode" == "prod-local" ]]; then
+  echo "Production (Local) build: release build for host platform only"
+  cd "$RUST_DIR"
+  
+  # Generate TypeScript exports via ts_rs (requires test execution in v12.0+)
+  echo "Generating TypeScript exports..."
+  cargo test --lib helper_requests::tests::ensure_ts_exports --quiet 2>/dev/null || true
+  cargo test --lib proxy_server::tests::ensure_ts_exports --quiet 2>/dev/null || true
+  format_ts_exports
+
+  target=$(native_rust_target)
+  if [[ -n "$target" ]]; then
+    if ! rustup target list --installed | grep -q "^${target}$"; then
+      echo "Adding rust target: $target"
+      rustup target add "$target" || true
+    fi
+    echo "Building release helper for target: $target"
+    cargo build --release --bin "$BIN_NAME" --target "$target"
+    rel_path="target/$target/release/$BIN_NAME"
+  else
+    echo "Unknown host target, using default cargo host build"
+    cargo build --release --bin "$BIN_NAME"
+    rel_path="target/release/$BIN_NAME"
+  fi
+
+  host=$(host_platform)
+  if [[ "$host" == win32-* ]]; then
+    if [[ -n "$target" ]]; then
+      rel_path="target/$target/release/$BIN_NAME.exe"
+    else
+      rel_path="target/release/$BIN_NAME.exe"
+    fi
+    BIN_NAME="$BIN_NAME.exe"
+  fi
+
+  # Copy to platform-specific directory expected by extension
+  copy_artifact "$rel_path" "$BINDIR/$host" "$BIN_NAME" || true
+  sync_proxy_binaries
+
+  echo "Prod-local build complete. Main binary: $BINDIR/$host/$BIN_NAME"
+  exit 0
+fi
+
 if [[ "$mode" == "prod" ]]; then
   echo "Production build: release builds for multiple targets"
 
+  if [[ "${SKIP_RUST_BUILD:-}" == "true" || "${SKIP_RUST_BUILD:-}" == "1" ]]; then
+    echo "SKIP_RUST_BUILD is set. Skipping Rust compilation and using existing binaries."
+    exit 0
+  fi
+
+  USE_CROSS=false
+  if command -v cross >/dev/null 2>&1; then
+    if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
+      USE_CROSS=true
+      echo "Using 'cross' for multi-platform builds"
+    fi
+  fi
+
   # All cross-compilation toolchains (messense MUSL, mingw-w64) are macOS-only
-  # Homebrew packages. Production builds must run on macOS.
-  if [[ "$(uname -s)" != "Darwin" ]]; then
-    echo "Error: production builds are only supported on macOS."
-    echo "All cross-compilation toolchains (messense MUSL, mingw-w64) are installed via Homebrew."
-    exit 1
+  # Homebrew packages. Production builds must run on macOS if cross is not available.
+  if [[ "$USE_CROSS" == "false" ]]; then
+    missing=()
+    command -v x86_64-unknown-linux-musl-gcc  >/dev/null 2>&1 || missing+=("x86_64-unknown-linux-musl-gcc")
+    command -v aarch64-unknown-linux-musl-gcc >/dev/null 2>&1 || missing+=("aarch64-unknown-linux-musl-gcc")
+    command -v x86_64-w64-mingw32-gcc         >/dev/null 2>&1 || missing+=("x86_64-w64-mingw32-gcc")
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+      echo "Warning: some cross-compilation toolchains are missing: ${missing[*]}"
+      echo "Targets requiring these toolchains will be skipped."
+    fi
   fi
 
+  # Always move to Rust project directory before building
   cd "$RUST_DIR"
-
-  # Verify all required cross-compilation toolchains are present before starting.
-  # Install with:
-  #   brew tap messense/macos-cross-toolchains
-  #   brew install x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-  #   brew install mingw-w64
-  missing=()
-  command -v x86_64-unknown-linux-musl-gcc  >/dev/null 2>&1 || missing+=("x86_64-unknown-linux-musl-gcc  (brew install x86_64-unknown-linux-musl)")
-  command -v aarch64-unknown-linux-musl-gcc >/dev/null 2>&1 || missing+=("aarch64-unknown-linux-musl-gcc (brew install aarch64-unknown-linux-musl)")
-  command -v x86_64-w64-mingw32-gcc         >/dev/null 2>&1 || missing+=("x86_64-w64-mingw32-gcc         (brew install mingw-w64)")
-  if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "Error: missing required cross-compilation toolchains:"
-    for m in "${missing[@]}"; do
-      echo "  - $m"
-    done
-    echo ""
-    echo "On macOS, install all prerequisites with:"
-    echo "  brew tap messense/macos-cross-toolchains"
-    echo "  brew install x86_64-unknown-linux-musl aarch64-unknown-linux-musl mingw-w64"
-    exit 1
-  fi
 
   # Generate TypeScript exports via ts_rs (requires test execution in v12.0+)
   echo "Generating TypeScript exports..."
@@ -208,8 +250,6 @@ if [[ "$mode" == "prod" ]]; then
   format_ts_exports
 
   # platform|target_triple|exe_ext
-  # Linux targets use MUSL for fully static binaries.
-  # Note: aarch64-pc-windows-gnu not yet in stable Rust, omitted for now
   targets=(
     "darwin-arm64|aarch64-apple-darwin|"
     "darwin-x64|x86_64-apple-darwin|"
@@ -220,6 +260,21 @@ if [[ "$mode" == "prod" ]]; then
 
   for entry in "${targets[@]}"; do
     IFS='|' read -r platform triple ext <<< "$entry"
+
+    # Skip Darwin targets on Linux if using cross
+    if [[ "$USE_CROSS" == "true" && "$platform" == darwin-* ]]; then
+      continue
+    fi
+
+    # Skip non-Darwin targets on macOS if toolchains are missing
+    if [[ "$(uname -s)" == "Darwin" && "$USE_CROSS" == "false" && "$platform" != darwin-* ]]; then
+      case "$platform" in
+        linux-arm64) command -v aarch64-unknown-linux-musl-gcc >/dev/null 2>&1 || { echo "Skipping $triple: toolchain missing"; continue; } ;;
+        linux-x64)   command -v x86_64-unknown-linux-musl-gcc  >/dev/null 2>&1 || { echo "Skipping $triple: toolchain missing"; continue; } ;;
+        win32-x64)   command -v x86_64-w64-mingw32-gcc         >/dev/null 2>&1 || { echo "Skipping $triple: toolchain missing"; continue; } ;;
+      esac
+    fi
+
     printf "\nBuilding target: %s (platform: %s)\n" "$triple" "$platform"
 
     # Ensure rustup target is installed
@@ -228,7 +283,12 @@ if [[ "$mode" == "prod" ]]; then
       rustup target add "$triple" || true
     fi
 
-    if cargo build --release --bin "$BIN_NAME" --target "$triple"; then
+    BUILD_CMD="cargo"
+    if [[ "$USE_CROSS" == "true" ]]; then
+      BUILD_CMD="cross"
+    fi
+
+    if $BUILD_CMD build --release --bin "$BIN_NAME" --target "$triple"; then
       artifact="target/$triple/release/$BIN_NAME$ext"
       dest_dir="$BINDIR/$platform"
       dest_name="$BIN_NAME$ext"
@@ -238,7 +298,7 @@ if [[ "$mode" == "prod" ]]; then
         echo "Expected artifact not found: $artifact"
       fi
     else
-      echo "cargo build failed for $triple — aborting."
+      echo "$BUILD_CMD build failed for $triple — aborting."
       exit 1
     fi
   done
