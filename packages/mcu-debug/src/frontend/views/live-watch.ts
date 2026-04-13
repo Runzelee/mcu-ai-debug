@@ -15,6 +15,8 @@ import {
     SetExpressionArgumentsLive,
 } from "../../adapter/custom-requests";
 import { VarUpdateRecord } from "../../adapter/gdb-mi/mi-types";
+import { LiveWatchLogger } from "./live-watch-logger";
+import { LiveWatchGrapher } from "./live-watch-grapher";
 
 // Configuration interfaces
 interface LiveWatchConfig {
@@ -220,6 +222,20 @@ export class LiveVariableNode {
 
     public getDisplayValue(): string {
         let displayValue = this.value;
+
+        // Normalize GDB raw formats for char/int8_t/enum types (e.g., `-1 '\377'`, `65 'A'`, `STATE = 0`)
+        if (displayValue) {
+            const charMatch = displayValue.match(/^(-?\d+)\s+'.*'$/);
+            if (charMatch) {
+                displayValue = charMatch[1];
+            } else {
+                const enumMatch = displayValue.match(/^.*=\s*(-?\d+)$/);
+                if (enumMatch) {
+                    displayValue = enumMatch[1];
+                }
+            }
+        }
+
         if (this.isComposite() || this.format === "natural" || this.value.startsWith("<") || !this.gdbVarName) {
             return displayValue;
         }
@@ -372,9 +388,38 @@ export class LiveVariableNode {
     private namedVariables: number = 0;
     private indexedVariables: number = 0;
     private refreshChildren(resolve: () => void) {
+        let isNeeded = this.expanded;
+        if (!isNeeded && this.expr) {
+            // Check logger recording list
+            const logger = LiveWatchLogger.getInstance();
+            if (logger.isRecording) {
+                for (const key of logger.getRecordedKeys()) {
+                    if (key.startsWith(this.expr + ".") || key.startsWith(this.expr + "->") || key.startsWith(this.expr + "[")) {
+                        isNeeded = true;
+                        break;
+                    }
+                }
+            }
+            // Check grapher plot list
+            if (!isNeeded) {
+                const grapher = (LiveWatchTreeProvider as any).prototype._grapherRef as LiveWatchGrapher | undefined;
+                // Fallback: use a static reference to directly check whether a graph panel is open
+                // Since LiveVariableNode cannot access the grapher directly, obtain it indirectly via mapUpdater
+                const provider = this.mapUpdater as any;
+                if (provider.grapher?.isOpen) {
+                    for (const key of provider.grapher.getGraphKeys()) {
+                        if (key.startsWith(this.expr + ".") || key.startsWith(this.expr + "->") || key.startsWith(this.expr + "[")) {
+                            isNeeded = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         if (!LiveWatchTreeProvider.session || this.session !== LiveWatchTreeProvider.session || !this.mapUpdater.getLiveSessionId()) {
             resolve();
-        } else if (this.expanded && (this.variablesReference > 0 || this.gdbVarName)) {
+        } else if (isNeeded && (this.variablesReference > 0 || this.gdbVarName)) {
             const recurseChildren = () => {
                 const promises = [];
                 for (const child of this.children ?? []) {
@@ -627,6 +672,8 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
     private liveSessionId: string | undefined;
     private refreshCallback?: () => void;
     private updateComposite: (items: WebviewTreeItem[]) => void = () => {};
+    private grapher?: LiveWatchGrapher;
+    public mcpListeners: ((time: number, data: { [key: string]: string }) => void)[] = [];
 
     protected oldState = new Map<string, vscode.TreeItemCollapsibleState>();
     constructor(private context: vscode.ExtensionContext) {
@@ -790,6 +837,59 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
         return undefined;
     }
 
+    public async startRecording() {
+        const logger = LiveWatchLogger.getInstance();
+        if (logger.isRecording) return;
+
+        const items = this.gatherLeafExprs();
+
+        if (items.length === 0) {
+            vscode.window.showInformationMessage("No valid variables to record. Add variables to Live Watch and expand structs first.");
+            return;
+        }
+
+        const selected = await vscode.window.showQuickPick(items, {
+            canPickMany: true,
+            placeHolder: "Select variables to record..."
+        });
+
+        if (selected && selected.length > 0) {
+            await logger.startRecording(selected);
+            this.refresh();
+        }
+    }
+
+    public stopRecording() {
+        LiveWatchLogger.getInstance().stopRecording();
+    }
+
+    public setGrapher(grapher: LiveWatchGrapher) {
+        this.grapher = grapher;
+    }
+
+    /**
+     * Collect all leaf-node expressions for use by the Grapher and the recorder.
+     */
+    public gatherLeafExprs(): string[] {
+        const gatherNodes = (node: LiveVariableNode): LiveVariableNode[] => {
+            let res: LiveVariableNode[] = [];
+            const actualChildren = node.getChildren();
+            const hasLoadedChildren = actualChildren && actualChildren.length > 0 && actualChildren[0].getName() !== "dummy";
+            const isCompound = node.variablesReference > 0 || hasLoadedChildren;
+            
+            if (node !== this.rootNode && !isCompound && !node.isDummyNode()) {
+                res.push(node);
+            }
+            if (hasLoadedChildren) {
+                for (const ch of actualChildren) {
+                    res = res.concat(gatherNodes(ch));
+                }
+            }
+            return res;
+        };
+        return gatherNodes(this.rootNode).map(n => n.getExpr()).filter(e => e);
+    }
+
     // --- End WebView Delegate ---
 
     addToMap(gdbName: string, node: LiveVariableNode): void {
@@ -881,6 +981,50 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
                 }
             }
             await Promise.allSettled(promises);
+
+            const logger = LiveWatchLogger.getInstance();
+            if (logger.isRecording) {
+                const recordData: { [key: string]: string } = {};
+                for (const n of nodes) {
+                    const expr = n.getExpr();
+                    if (expr && logger.isKeyRecorded(expr)) {
+                        recordData[expr] = n.getDisplayValue();
+                    }
+                }
+                if (Object.keys(recordData).length > 0) {
+                    logger.record(Date.now(), recordData);
+                }
+            }
+
+            if (this.grapher?.isOpen) {
+                const graphData: { [key: string]: string } = {};
+                const graphKeys = this.grapher.getGraphKeys();
+                for (const n of nodes) {
+                    const expr = n.getExpr();
+                    if (expr && graphKeys.includes(expr)) {
+                        graphData[expr] = n.getDisplayValue();
+                    }
+                }
+                if (Object.keys(graphData).length > 0) {
+                    this.grapher.pushData(Date.now(), graphData);
+                }
+            }
+
+            // MCP listeners
+            if (this.mcpListeners && this.mcpListeners.length > 0) {
+                const now = Date.now();
+                const mcpData: { [key: string]: string } = {};
+                for (const n of nodes) {
+                    const expr = n.getExpr();
+                    if (expr) mcpData[expr] = n.getDisplayValue();
+                }
+                if (Object.keys(mcpData).length > 0) {
+                    for (const cb of this.mcpListeners) {
+                        cb(now, mcpData);
+                    }
+                }
+            }
+
             const trNodes: WebviewTreeItem[] = [];
             for (const n of nodes) {
                 // Efficiency hack: Only send if needed?

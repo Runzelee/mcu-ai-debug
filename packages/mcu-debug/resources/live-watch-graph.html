@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Watch Graph</title>
+    <style nonce="${nonce}">
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: var(--vscode-editor-background);
+            color: var(--vscode-editor-foreground);
+            font-family: var(--vscode-font-family, 'Segoe UI', sans-serif);
+            font-size: var(--vscode-font-size, 13px);
+            overflow: hidden;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .toolbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            background: var(--vscode-titleBar-activeBackground, #1e1e1e);
+            border-bottom: 1px solid var(--vscode-panel-border, #333);
+            flex-shrink: 0;
+        }
+
+        .toolbar button {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            padding: 4px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .toolbar button:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+        .toolbar button.active {
+            background: var(--vscode-inputValidation-warningBackground, #856404);
+        }
+
+        .toolbar .spacer { flex: 1; }
+
+        .toolbar label {
+            font-size: 12px;
+            color: var(--vscode-descriptionForeground);
+        }
+
+        .toolbar select, .toolbar input[type="number"] {
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border, #444);
+            padding: 2px 4px;
+            border-radius: 2px;
+            font-size: 12px;
+        }
+
+        .toolbar input[type="number"] {
+            width: 60px;
+        }
+
+        .chart-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .chart-row {
+            flex: 1;
+            display: flex;
+            min-height: 0;
+        }
+
+        .chart-container {
+            flex: 1;
+            position: relative;
+            min-width: 0;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        .scrollbar-y {
+            width: 14px;
+            background: var(--vscode-scrollbar-shadow, #111);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .scrollbar-y input[type="range"] {
+            writing-mode: vertical-lr;
+            direction: rtl;
+            height: calc(100% - 8px);
+            width: 14px;
+            accent-color: var(--vscode-scrollbarSlider-background, #555);
+            cursor: ns-resize;
+        }
+
+        .scrollbar-t {
+            height: 14px;
+            background: var(--vscode-scrollbar-shadow, #111);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            margin-left: 65px;
+            margin-right: 74px;
+        }
+
+        .scrollbar-t input[type="range"] {
+            width: 100%;
+            height: 14px;
+            accent-color: var(--vscode-scrollbarSlider-background, #555);
+            cursor: ew-resize;
+        }
+
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            padding: 6px 12px;
+            background: var(--vscode-titleBar-activeBackground, #1e1e1e);
+            border-top: 1px solid var(--vscode-panel-border, #333);
+            flex-shrink: 0;
+            max-height: 60px;
+            overflow-y: auto;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            cursor: pointer;
+            opacity: 1;
+            transition: opacity 0.2s;
+        }
+        .legend-item.hidden {
+            opacity: 0.35;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 3px;
+            border-radius: 1px;
+        }
+
+        .legend-value {
+            color: var(--vscode-descriptionForeground);
+            font-family: var(--vscode-editor-font-family, monospace);
+        }
+
+        .tooltip {
+            position: absolute;
+            background: var(--vscode-editorHoverWidget-background, #252526);
+            border: 1px solid var(--vscode-editorHoverWidget-border, #454545);
+            color: var(--vscode-editorHoverWidget-foreground, #ccc);
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-family: var(--vscode-editor-font-family, monospace);
+            pointer-events: none;
+            display: none;
+            z-index: 10;
+            white-space: pre;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <button id="btn-pause" title="Pause/Resume">⏸ Pause</button>
+        <button id="btn-clear" title="Clear Data">🗑 Clear</button>
+        <button id="btn-autofit" title="Auto-scroll / Pan mode toggle">🔒 Auto</button>
+        <div class="spacer"></div>
+        <label>Time Window:</label>
+        <input type="number" id="timespan" value="10" min="1" max="300" step="1">
+        <label>sec</label>
+        <label style="margin-left:8px">Mode:</label>
+        <select id="mode">
+            <option value="overlay">Overlay</option>
+            <option value="split">Split</option>
+        </select>
+    </div>
+    <div class="chart-area">
+        <div class="chart-row">
+            <div class="chart-container">
+                <canvas id="graph-canvas"></canvas>
+                <div class="tooltip" id="tooltip"></div>
+            </div>
+            <div class="scrollbar-y" title="Y-axis zoom (drag to zoom vertically)">
+                <input type="range" id="slider-y" min="1" max="200" value="100" step="1">
+            </div>
+        </div>
+        <div class="scrollbar-t" title="Time-axis zoom (drag to zoom horizontally)">
+            <input type="range" id="slider-t" min="1" max="200" value="100" step="1">
+        </div>
+    </div>
+    <div class="legend" id="legend"></div>
+
+    <script nonce="${nonce}" src="${scriptUri}"></script>
+</body>
+</html>

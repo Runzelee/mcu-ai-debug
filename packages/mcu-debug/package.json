@@ -357,6 +357,26 @@
             "description": "Path to the PE Micro GDB Server. If not set, the extension will look in the system path."
           }
         }
+      },
+      {
+        "title": "MCU Debug: MCP AI Integration",
+        "properties": {
+          "mcu-debug.mcpRequireManualRecording": {
+            "type": "boolean",
+            "default": false,
+            "description": "If enabled, AI Agent recording requests require manual user confirmation (Start/Stop) instead of running for a fixed duration. Useful for synchronizing data capture with physical hardware operations."
+          },
+          "mcu-debug.mcpRecordingMaxDuration": {
+            "type": "number",
+            "default": 30,
+            "description": "Maximum allowed recording duration (in seconds) for AI agents in automatic mode."
+          },
+          "mcu-debug.mcpManualRecordingMaxDuration": {
+            "type": "number",
+            "default": 60,
+            "description": "Maximum allowed recording duration (in seconds) for AI agents in manual mode. Should be >= mcpRecordingMaxDuration to account for human reaction time."
+          }
+        }
       }
     ],
     "commands": [
@@ -429,6 +449,34 @@
         "command": "mcu-debug.liveWatch.addExpr",
         "title": "Add expression to Live Watch window",
         "icon": "$(plus)"
+      },
+      {
+        "category": "MCU-Debug",
+        "command": "mcu-debug.liveWatch.addSelectionToLiveWatch",
+        "title": "Add to Live Watch"
+      },
+      {
+        "category": "MCU-Debug",
+        "command": "mcu-debug.liveWatch.startRecording",
+        "title": "Start Recording",
+        "icon": "$(record)"
+      },
+      {
+        "category": "MCU-Debug",
+        "command": "mcu-debug.liveWatch.stopRecording",
+        "title": "Stop Recording",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "category": "MCU-Debug",
+        "command": "mcu-debug.liveWatch.openGraph",
+        "title": "Open Live Graph",
+        "icon": "$(graph-line)"
+      },
+      {
+        "category": "MCU-Debug",
+        "command": "mcu-debug.generateMcpConfig",
+        "title": "Generate MCP Configuration for AI Agents"
       }
     ],
     "keybindings": [
@@ -3515,6 +3563,21 @@
           "group": "navigation"
         },
         {
+          "command": "mcu-debug.liveWatch.startRecording",
+          "when": "view == mcu-debug.liveWatch && !mcu-debug:isLiveWatchRecording",
+          "group": "navigation"
+        },
+        {
+          "command": "mcu-debug.liveWatch.stopRecording",
+          "when": "view == mcu-debug.liveWatch && mcu-debug:isLiveWatchRecording",
+          "group": "navigation"
+        },
+        {
+          "command": "mcu-debug.liveWatch.openGraph",
+          "when": "view == mcu-debug.liveWatch",
+          "group": "navigation"
+        },
+        {
           "command": "mcu-debug.varHexModeTurnOn",
           "when": "view == workbench.debug.variablesView && inDebugMode && debugType == 'mcu-debug' && debugState == stopped &&  mcu-debug:variableUseNaturalFormat",
           "group": "navigation"
@@ -3550,6 +3613,13 @@
           "command": "mcu-debug.liveWatch.addToLiveWatch",
           "when": "inDebugMode && debugType == 'mcu-debug' && debugState == stopped",
           "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "mcu-debug.liveWatch.addSelectionToLiveWatch",
+          "when": "inDebugMode && debugType == 'mcu-debug'",
+          "group": "debug"
         }
       ]
     },
@@ -3612,6 +3682,7 @@
     "winston-vscode": "^1.0.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@vscode/codicons": "^0.0.44",
     "glob": "^13.0.6",
     "sorted-array-type": "^1.3.0"

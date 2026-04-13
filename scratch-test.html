@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<body>
+<div style="width: 800px; height: 600px;">
+<canvas id="graph-canvas"></canvas>
+<div id="tooltip"></div>
+</div>
+<div id="legend"></div>
+<button id="btn-pause"></button>
+<button id="btn-clear"></button>
+<input id="timespan" value="10">
+<select id="mode"><option value="overlay">Overlay</option><option value="split">Split</option></select>
+<script>
+window.acquireVsCodeApi = () => ({ postMessage: () => {} });
+</script>
+<script src="packages/mcu-debug/resources/live-watch-graph.js"></script>
+</body>
+</html>
