@@ -1,12 +1,29 @@
 #!/usr/bin/env node
-// Cross-platform wrapper for build-binaries.sh. Runs from monorepo root.
+// Cross-platform wrapper for build-binaries. Runs from monorepo root.
 const { spawnSync } = require('child_process');
 const path = require('path');
 
 const mode = process.argv[2] || 'dev';
 const root = path.resolve(__dirname, '../../..');
-const script = path.join(root, 'scripts', 'build-binaries.sh');
-const bash = process.platform === 'win32' ? 'bash.exe' : 'bash';
+const isWin = process.platform === 'win32';
 
-const result = spawnSync(bash, [script, mode], { cwd: root, stdio: 'inherit', shell: false });
+let cmd, args;
+if (isWin) {
+    cmd = 'powershell.exe';
+    const script = path.join(root, 'scripts', 'build-binaries.ps1');
+    args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, mode];
+} else {
+    cmd = 'bash';
+    const script = path.join(root, 'scripts', 'build-binaries.sh');
+    args = [script, mode];
+}
+
+console.log(`Building Rust components (${mode}) via ${cmd}...`);
+const result = spawnSync(cmd, args, { cwd: root, stdio: 'inherit', shell: false });
+
+if (result.error) {
+    console.error('Failed to start build process:', result.error);
+    process.exit(1);
+}
+
 process.exit(result.status ?? 1);
