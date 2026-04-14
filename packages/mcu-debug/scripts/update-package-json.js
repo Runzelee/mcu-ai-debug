@@ -3,19 +3,6 @@ const path = require("path");
 const definitions = require("../manifest-src/definitions");
 
 const PACKAGE_JSON_PATH = path.join(__dirname, "../package.json");
-const PROXY_PACKAGE_JSON_PATH = path.join(__dirname, "../../mcu-debug-proxy/package.json");
-
-function enforceVersionSync(pkg) {
-    const proxyPkg = JSON.parse(fs.readFileSync(PROXY_PACKAGE_JSON_PATH, "utf8"));
-    if (pkg.version !== proxyPkg.version) {
-        throw new Error(
-            `Version mismatch detected:\n` +
-                `  packages/mcu-debug/package.json: ${pkg.version}\n` +
-                `  packages/mcu-debug-proxy/package.json: ${proxyPkg.version}\n` +
-                `Keep extension versions synchronized before running update-package-json.js.`,
-        );
-    }
-}
 
 function createPlatformProps(name, description) {
     const props = {};
@@ -70,19 +57,19 @@ function generateConfiguration() {
         ...createPlatformProps("PEGDBServerPath", "Path to the PE Micro GDB Server. If not set, the extension will look in the system path."),
     };
 
-    // Group 4: MCP AI Integration
+    // Group 4: MCP AI Integration (Using mcu-debug-ai prefix)
     const mcpProperties = {
-        "mcu-debug.mcpRequireManualRecording": {
+        "mcu-debug-ai.mcpRequireManualRecording": {
             type: "boolean",
             default: false,
             description: "If enabled, AI Agent recording requests require manual user confirmation (Start/Stop) instead of running for a fixed duration. Useful for synchronizing data capture with physical hardware operations.",
         },
-        "mcu-debug.mcpRecordingMaxDuration": {
+        "mcu-debug-ai.mcpRecordingMaxDuration": {
             type: "number",
             default: 30,
             description: "Maximum allowed recording duration (in seconds) for AI agents in automatic mode.",
         },
-        "mcu-debug.mcpManualRecordingMaxDuration": {
+        "mcu-debug-ai.mcpManualRecordingMaxDuration": {
             type: "number",
             default: 60,
             description: "Maximum allowed recording duration (in seconds) for AI agents in manual mode. Should be >= mcpRecordingMaxDuration to account for human reaction time.",
@@ -115,13 +102,11 @@ function generateDebuggers() {
     // Launch specific properties
     const launchProps = {
         ...commonProps,
-        // Add launch-only properties here if any
     };
 
     // Attach specific properties
     const attachProps = {
         ...commonProps,
-        // Add attach-only properties here if any
     };
 
     return [
@@ -249,11 +234,7 @@ function generateDebuggers() {
 function updatePackageJson() {
     const pkg = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, "utf8"));
 
-    enforceVersionSync(pkg);
-
     // Keep packaging scripts non-recursive.
-    // `vsce package` always runs `vscode:prepublish`; if that script calls `npm run package`,
-    // and `package` itself calls `vsce package`, packaging recurses indefinitely.
     if (pkg.scripts) {
         pkg.scripts["vscode:prepublish"] = "npm run build-all";
         pkg.scripts["package"] = "vsce package --no-dependencies";

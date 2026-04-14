@@ -294,7 +294,7 @@ export class LiveWatchMcpServer {
 
     public start() {
         this.server.listen(this.port, "127.0.0.1", () => {
-            console.log(`MCU-Debug MCP Server listening on 127.0.0.1:${this.port}`);
+            console.log(`MCU-Debug-AI MCP Server listening on 127.0.0.1:${this.port}`);
         });
 
         this.server.on("error", (e: NodeJS.ErrnoException) => {

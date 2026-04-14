@@ -2,6 +2,7 @@
   "name": "@mcu-debug/shared",
   "version": "0.0.1",
   "private": true,
+  "author": "Runze Lee <lhx060906@gmail.com>",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
   "exports": {

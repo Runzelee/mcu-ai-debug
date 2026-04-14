@@ -1,28 +1,31 @@
 {
   "name": "mcu-debug-ai",
-  "publisher": "mcu-debug",
+  "publisher": "runzelee",
   "version": "0.1.1",
   "preview": true,
-  "description": "A debugger and debug adapter for MCUs",
+  "description": "High-performance MCU debugger with AI/MCP integration, real-time graphing, and local recording.",
   "displayName": "MCU-Debug-AI",
   "keywords": [
     "MCU",
     "Cortex-Debug",
-    "MCU-Debug",
-    "ARM",
-    "RISC-V",
-    "debugger"
+    "AI",
+    "MCP",
+    "Graph",
+    "Embedded",
+    "ARM"
   ],
-  "homepage": "https://github.com/mcu-debug/mcu-debug#readme",
+  "homepage": "https://github.com/Runzelee/mcu-debug-ai#readme",
   "bugs": {
-    "url": "https://github.com/mcu-debug/mcu-debug/issues"
+    "url": "https://github.com/Runzelee/mcu-debug-ai/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mcu-debug/mcu-debug.git"
+    "url": "https://github.com/Runzelee/mcu-debug-ai.git"
   },
   "license": "MIT AND Apache-2.0",
   "author": "Runze Lee <lhx060906@gmail.com>",
+  "qna": "marketplace",
+  "pricing": "Free",
   "extensionKind": [
     "workspace"
   ],
@@ -361,17 +364,17 @@
       {
         "title": "MCU Debug: MCP AI Integration",
         "properties": {
-          "mcu-debug.mcpRequireManualRecording": {
+          "mcu-debug-ai.mcpRequireManualRecording": {
             "type": "boolean",
             "default": false,
             "description": "If enabled, AI Agent recording requests require manual user confirmation (Start/Stop) instead of running for a fixed duration. Useful for synchronizing data capture with physical hardware operations."
           },
-          "mcu-debug.mcpRecordingMaxDuration": {
+          "mcu-debug-ai.mcpRecordingMaxDuration": {
             "type": "number",
             "default": 30,
             "description": "Maximum allowed recording duration (in seconds) for AI agents in automatic mode."
           },
-          "mcu-debug.mcpManualRecordingMaxDuration": {
+          "mcu-debug-ai.mcpManualRecordingMaxDuration": {
             "type": "number",
             "default": 60,
             "description": "Maximum allowed recording duration (in seconds) for AI agents in manual mode. Should be >= mcpRecordingMaxDuration to account for human reaction time."
@@ -452,30 +455,30 @@
       },
       {
         "category": "MCU-Debug",
-        "command": "mcu-debug.liveWatch.addSelectionToLiveWatch",
+        "command": "mcu-debug-ai.liveWatch.addSelectionToLiveWatch",
         "title": "Add to Live Watch"
       },
       {
         "category": "MCU-Debug",
-        "command": "mcu-debug.liveWatch.startRecording",
+        "command": "mcu-debug-ai.liveWatch.startRecording",
         "title": "Start Recording",
         "icon": "$(record)"
       },
       {
         "category": "MCU-Debug",
-        "command": "mcu-debug.liveWatch.stopRecording",
+        "command": "mcu-debug-ai.liveWatch.stopRecording",
         "title": "Stop Recording",
         "icon": "$(debug-stop)"
       },
       {
         "category": "MCU-Debug",
-        "command": "mcu-debug.liveWatch.openGraph",
+        "command": "mcu-debug-ai.liveWatch.openGraph",
         "title": "Open Live Graph",
         "icon": "$(graph-line)"
       },
       {
         "category": "MCU-Debug",
-        "command": "mcu-debug.generateMcpConfig",
+        "command": "mcu-debug-ai.generateMcpConfig",
         "title": "Generate MCP Configuration for AI Agents"
       }
     ],
@@ -3563,17 +3566,17 @@
           "group": "navigation"
         },
         {
-          "command": "mcu-debug.liveWatch.startRecording",
+          "command": "mcu-debug-ai.liveWatch.startRecording",
           "when": "view == mcu-debug.liveWatch && !mcu-debug:isLiveWatchRecording",
           "group": "navigation"
         },
         {
-          "command": "mcu-debug.liveWatch.stopRecording",
+          "command": "mcu-debug-ai.liveWatch.stopRecording",
           "when": "view == mcu-debug.liveWatch && mcu-debug:isLiveWatchRecording",
           "group": "navigation"
         },
         {
-          "command": "mcu-debug.liveWatch.openGraph",
+          "command": "mcu-debug-ai.liveWatch.openGraph",
           "when": "view == mcu-debug.liveWatch",
           "group": "navigation"
         },
@@ -3617,7 +3620,7 @@
       ],
       "editor/context": [
         {
-          "command": "mcu-debug.liveWatch.addSelectionToLiveWatch",
+          "command": "mcu-debug-ai.liveWatch.addSelectionToLiveWatch",
           "when": "inDebugMode && debugType == 'mcu-debug'",
           "group": "debug"
         }

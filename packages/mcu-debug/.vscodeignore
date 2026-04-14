@@ -4,6 +4,7 @@ unused/**
 images/unused/**
 out/**
 src/**
+test/**
 .gitignore
 .gitattributes
 .prettierrc
@@ -26,4 +27,5 @@ tmp/**
 **/tmp/**
 **/.#*
 **/*~
-# bin/mcu-debug-helper*
+# Do not ignore bin directory - it contains the required Rust helper binaries
+!bin/**

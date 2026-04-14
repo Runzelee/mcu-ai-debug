@@ -161,7 +161,6 @@ if [[ "$mode" == "dev" ]]; then
 
   # Copy root binary
   copy_artifact "$dbg_path" "$BINDIR" "$BIN_NAME" || true
-  sync_proxy_binaries
 
   echo "Dev build complete. Main binary: $BINDIR/$BIN_NAME"
   exit 0

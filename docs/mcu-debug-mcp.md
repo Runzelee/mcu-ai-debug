@@ -77,7 +77,7 @@ You have access to the following MCP tools. They are already wired into the runn
 
 **Important behavior**:
 - This tool will **block for a long time** while waiting for the user to physically interact with their hardware and click buttons. This is completely normal. Do NOT abort or time out early.
-- The maximum wall-clock time is controlled by the user's `mcu-debug.mcpManualRecordingMaxDuration` setting (default: 60s).
+- The maximum wall-clock time is controlled by the user's `mcu-debug-ai.mcpManualRecordingMaxDuration` setting (default: 60s).
 
 **Output** (JSON):
 | status | Description |
@@ -115,6 +115,6 @@ This project has MCU-Debug MCP integration configured. To use it with your AI as
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `mcu-debug.mcpRequireManualRecording` | boolean | false | If enabled, `record_livewatch_variables` returns `MANUAL_MODE_REQUIRED` and agents must use the manual tool. |
-| `mcu-debug.mcpRecordingMaxDuration` | number | 30 | Max recording duration in seconds for automatic mode. |
-| `mcu-debug.mcpManualRecordingMaxDuration` | number | 60 | Max recording duration in seconds for manual mode. |
+| `mcu-debug-ai.mcpRequireManualRecording` | boolean | false | If enabled, `record_livewatch_variables` returns `MANUAL_MODE_REQUIRED` and agents must use the manual tool. |
+| `mcu-debug-ai.mcpRecordingMaxDuration` | number | 30 | Max recording duration in seconds for automatic mode. |
+| `mcu-debug-ai.mcpManualRecordingMaxDuration` | number | 60 | Max recording duration in seconds for manual mode. |
