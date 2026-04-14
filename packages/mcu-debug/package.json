@@ -1,18 +1,24 @@
 {
   "name": "mcu-debug-ai",
-  "publisher": "runzelee",
+  "publisher": "Runzelee",
   "version": "0.1.1",
-  "preview": true,
+  "preview": false,
   "description": "High-performance MCU debugger with AI/MCP integration, real-time graphing, and local recording.",
   "displayName": "MCU-Debug-AI",
   "keywords": [
     "MCU",
-    "Cortex-Debug",
     "AI",
     "MCP",
+    "Model Context Protocol",
+    "LLM",
+    "Copilot",
+    "Cursor",
+    "Claude",
+    "Cortex-Debug",
     "Graph",
     "Embedded",
-    "ARM"
+    "ARM",
+    "Real-time"
   ],
   "homepage": "https://github.com/Runzelee/mcu-debug-ai#readme",
   "bugs": {
@@ -20,7 +26,8 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Runzelee/mcu-debug-ai.git"
+    "url": "https://github.com/Runzelee/mcu-debug-ai.git",
+    "directory": "packages/mcu-debug"
   },
   "license": "MIT AND Apache-2.0",
   "author": "Runze Lee <lhx060906@gmail.com>",
@@ -29,14 +36,16 @@
   "extensionKind": [
     "workspace"
   ],
-  "icon": "images/mcu-debug-128x128.png",
+  "icon": "images/mcu-debug-ai-128x128.png",
   "activationEvents": [
     "onDebugResolve:cortex-debug",
     "onDebugResolve:mcu-debug",
     "onStartupFinished"
   ],
   "categories": [
-    "Debuggers"
+    "Debuggers",
+    "Visualization",
+    "Programming Languages"
   ],
   "engines": {
     "vscode": "^1.80.0"
@@ -3653,7 +3662,7 @@
     "watch:tsc": "tsc-strict --noEmit --watch --project tsconfig.json",
     "vscode:prepublish": "npm run build-all",
     "build-rust-prod": "node scripts/build-rust.js prod",
-    "build-all": "npm run build-rust-prod && npm run generate-manifest && npm run update-commit-hash && npm run check-types && node esbuild.js --production",
+    "build-all": "npm run build-rust-prod && npm run copy-codicons && npm run generate-manifest && npm run update-commit-hash && npm run check-types && node esbuild.js --production",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {

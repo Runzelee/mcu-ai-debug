@@ -32,7 +32,6 @@ packages/*/out/
 packages/*/dist/
 packages/*/target/
 packages/*/node_modules/
-packages/mcu-debug/bin/
 
 # Rust build artifacts
 packages/mcu-debug-helper/target/
@@ -68,6 +67,7 @@ $RECYCLE.BIN/
 # IDEs
 *.iml
 .idea/
+.claude/
 *.iws
 *.ipr
 

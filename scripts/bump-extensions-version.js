@@ -5,7 +5,7 @@ const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
 const MCU_DEBUG_PKG = path.join(ROOT, "packages", "mcu-debug", "package.json");
-const MCU_DEBUG_PROXY_PKG = path.join(ROOT, "packages", "mcu-debug-proxy", "package.json");
+// const MCU_DEBUG_PROXY_PKG = path.join(ROOT, "packages", "mcu-debug-proxy", "package.json");
 
 function fail(message) {
     console.error(message);
@@ -45,23 +45,23 @@ function main() {
     const { version, dryRun } = parseArgs(process.argv);
 
     const mcuPkg = readJson(MCU_DEBUG_PKG);
-    const proxyPkg = readJson(MCU_DEBUG_PROXY_PKG);
+    // const proxyPkg = readJson(MCU_DEBUG_PROXY_PKG);
 
     const oldMcuVersion = mcuPkg.version;
-    const oldProxyVersion = proxyPkg.version;
+    // const oldProxyVersion = proxyPkg.version;
 
     mcuPkg.version = version;
-    proxyPkg.version = version;
+    // proxyPkg.version = version;
 
     if (!dryRun) {
         writeJson(MCU_DEBUG_PKG, mcuPkg);
-        writeJson(MCU_DEBUG_PROXY_PKG, proxyPkg);
+        // writeJson(MCU_DEBUG_PROXY_PKG, proxyPkg);
     }
 
     const mode = dryRun ? "[dry-run] " : "";
     console.log(`${mode}Updated extension versions:`);
     console.log(`  packages/mcu-debug/package.json: ${oldMcuVersion} -> ${version}`);
-    console.log(`  packages/mcu-debug-proxy/package.json: ${oldProxyVersion} -> ${version}`);
+    // console.log(`  packages/mcu-debug-proxy/package.json: ${oldProxyVersion} -> ${version}`);
 }
 
 main();

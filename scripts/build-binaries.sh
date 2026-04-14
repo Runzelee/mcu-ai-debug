@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_DIR="$ROOT_DIR/packages/mcu-debug-helper"
 BINDIR="$ROOT_DIR/packages/mcu-debug/bin"
-PROXY_BINDIR="$ROOT_DIR/packages/mcu-debug-proxy/bin"
+# PROXY_BINDIR="$ROOT_DIR/packages/mcu-debug-proxy/bin"
 BIN_NAME="mcu-debug-helper"
 
 mkdir -p "$BINDIR"
@@ -113,16 +113,16 @@ function copy_artifact() {
   echo "Wrote: $dest_dir/$dest_name"
 }
 
-function sync_proxy_binaries() {
-  [[ -n "${PROXY_BINDIR:-}" && "$PROXY_BINDIR" != "/" ]] || {
-    echo "Refusing to clear PROXY_BINDIR='$PROXY_BINDIR'"
-    exit 1
-  }
-  mkdir -p "$PROXY_BINDIR"
-  find "$PROXY_BINDIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-  cp -R "$BINDIR"/. "$PROXY_BINDIR"/
-  echo "Synchronized helper binaries to: $PROXY_BINDIR"
-}
+# function sync_proxy_binaries() {
+#   [[ -n "${PROXY_BINDIR:-}" && "$PROXY_BINDIR" != "/" ]] || {
+#     echo "Refusing to clear PROXY_BINDIR='$PROXY_BINDIR'"
+#     exit 1
+#   }
+#   mkdir -p "$PROXY_BINDIR"
+#   find "$PROXY_BINDIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+#   cp -R "$BINDIR"/. "$PROXY_BINDIR"/
+#   echo "Synchronized helper binaries to: $PROXY_BINDIR"
+# }
 
 if [[ "$mode" == "dev" ]]; then
   echo "Dev build: building for host platform (debug)"
@@ -203,7 +203,7 @@ if [[ "$mode" == "prod-local" ]]; then
 
   # Copy to platform-specific directory expected by extension
   copy_artifact "$rel_path" "$BINDIR/$host" "$BIN_NAME" || true
-  sync_proxy_binaries
+  # sync_proxy_binaries
 
   echo "Prod-local build complete. Main binary: $BINDIR/$host/$BIN_NAME"
   exit 0
@@ -302,7 +302,7 @@ if [[ "$mode" == "prod" ]]; then
     fi
   done
 
-  sync_proxy_binaries
+  # sync_proxy_binaries
 
   echo "Production build done. Binaries under: $BINDIR"
   exit 0

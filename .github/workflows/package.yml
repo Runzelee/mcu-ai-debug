@@ -93,9 +93,9 @@ jobs:
           ls -R bin-artifacts/
           
           # Copy binaries from the platform-specific artifact directories back to packages/mcu-debug/bin
-          # The -r flag is used to copy directories recursively
-          cp -rn bin-artifacts/binaries-linux-windows/* packages/mcu-debug/bin/ || true
-          cp -rn bin-artifacts/binaries-darwin/* packages/mcu-debug/bin/ || true
+          # The -a flag is used to preserve attributes and copy recursively
+          cp -a bin-artifacts/binaries-linux-windows/. packages/mcu-debug/bin/ || true
+          cp -a bin-artifacts/binaries-darwin/. packages/mcu-debug/bin/ || true
           
           echo "Final consolidated binary structure:"
           ls -R packages/mcu-debug/bin/
