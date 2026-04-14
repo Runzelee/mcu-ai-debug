@@ -203,12 +203,28 @@ export class GDBServerSession extends EventEmitter {
                 }
             } else {
                 let count = 0;
-                timer = setInterval(() => {
+                const gdbPortNm = createPortName(this.session.args.targetProcessor || 0, "gdbPort");
+                const gdbport = this.ports[gdbPortNm]?.localPort;
+                const isWindows = process.platform === "win32";
+
+                timer = setInterval(async () => {
                     if (resolved || this.clientRequestedStop) {
                         killTimers();
+                        return;
                     }
                     this.session.handleMsg(GdbEventNames.Console, `Waiting for gdb-server to start ${++count}...\n`);
-                }, 5000);
+                    
+                    // Fallback: If the GDB port is already listening, assume server is ready even if regex fails
+                    if (gdbport && !this.proxyClient) {
+                        if (await isPortListening(gdbport, 1000)) {
+                            this.session.handleMsg(GdbEventNames.Console, `GDB-Server port ${gdbport} is listening (Fallback). Proceeding...\n`);
+                            resolved = true;
+                            killTimers();
+                            this.serverController.serverLaunchCompleted();
+                            resolve();
+                        }
+                    }
+                }, 2000);
 
                 timeout = setTimeout(
                     () => {
@@ -220,21 +236,26 @@ export class GDBServerSession extends EventEmitter {
                             reject(new Error("Timeout waiting for gdb-server to start"));
                         }
                     },
-                    5 * 60 * 1000,
+                    2 * 60 * 1000, // Reduced from 5 min to 2 min
                 );
             }
 
             if (this.process) {
+                let outputBuffer = "";
                 const handleOutput = (data: Buffer) => {
                     this.writeToConsole(data);
 
                     if (matchRegex && !resolved) {
-                        const str = data.toString();
-                        if (matchRegex.test(str)) {
+                        outputBuffer += data.toString();
+                        if (matchRegex.test(outputBuffer)) {
                             resolved = true;
                             killTimers();
                             this.serverController.serverLaunchCompleted();
                             resolve();
+                        }
+                        // Keep only the last 2000 characters to avoid memory issues while handling split chunks
+                        if (outputBuffer.length > 2000) {
+                            outputBuffer = outputBuffer.slice(-1000);
                         }
                     }
                 };

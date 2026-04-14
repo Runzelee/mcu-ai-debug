@@ -454,30 +454,30 @@
         "icon": "$(plus)"
       },
       {
-        "category": "MCU-Debug",
+        "category": "MCU-Debug-AI",
         "command": "mcu-debug-ai.liveWatch.addSelectionToLiveWatch",
         "title": "Add to Live Watch"
       },
       {
-        "category": "MCU-Debug",
+        "category": "MCU-Debug-AI",
         "command": "mcu-debug-ai.liveWatch.startRecording",
         "title": "Start Recording",
         "icon": "$(record)"
       },
       {
-        "category": "MCU-Debug",
+        "category": "MCU-Debug-AI",
         "command": "mcu-debug-ai.liveWatch.stopRecording",
         "title": "Stop Recording",
         "icon": "$(debug-stop)"
       },
       {
-        "category": "MCU-Debug",
+        "category": "MCU-Debug-AI",
         "command": "mcu-debug-ai.liveWatch.openGraph",
         "title": "Open Live Graph",
         "icon": "$(graph-line)"
       },
       {
-        "category": "MCU-Debug",
+        "category": "MCU-Debug-AI",
         "command": "mcu-debug-ai.generateMcpConfig",
         "title": "Generate MCP Configuration for AI Agents"
       }

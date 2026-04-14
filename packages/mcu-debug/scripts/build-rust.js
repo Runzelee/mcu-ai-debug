@@ -7,6 +7,11 @@ const mode = process.argv[2] || 'dev';
 const root = path.resolve(__dirname, '../../..');
 const isWin = process.platform === 'win32';
 
+if (process.env.SKIP_RUST_BUILD === 'true' || process.env.SKIP_RUST_BUILD === '1') {
+    console.log('SKIP_RUST_BUILD is set. Skipping Rust compilation.');
+    process.exit(0);
+}
+
 let cmd, args;
 if (isWin) {
     cmd = 'powershell.exe';

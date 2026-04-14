@@ -275,7 +275,7 @@ export class OpenOCDServerController extends EventEmitter implements GDBServerCo
     }
 
     public initMatch(): RegExp {
-        return /Info\s:[^\n]*Listening on port \d+ for gdb connection/i;
+        return /Listening on port \d+ for gdb connections?/i;
     }
 
     public serverLaunchStarted(): void {}
