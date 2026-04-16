@@ -1,4 +1,4 @@
-# MCU-Debug-AI: An Advanced UI and AI Integration Fork of MCU-Debug
+# MCU-AI-Debug: An Advanced UI and AI Integration Fork of MCU-Debug
 
 This readme covers the major capabilities added to the `mcu-debug` VS Code extension, including editor integration for quick Live Watch additions, local recording to common file formats, a high-performance real-time graphing engine, and a Model Context Protocol (MCP) bridge for AI agent interoperability.
 
@@ -40,17 +40,17 @@ When `get_livewatch_variables` encounters an unexpanded struct or array, it retu
 
 ### Recording Modes
 
-**Automatic Mode** (default): The agent specifies `duration_ms` and a progress notification with a cancel button appears in VS Code. Duration is capped by `mcu-debug-ai.mcpRecordingMaxDuration` (default: 30s).
+**Automatic Mode** (default): The agent specifies `duration_ms` and a progress notification with a cancel button appears in VS Code. Duration is capped by `mcu-ai-debug.mcpRecordingMaxDuration` (default: 30s).
 
-**Manual Mode** (opt-in via settings): When `mcu-debug-ai.mcpRequireManualRecording` is enabled, calling `record_livewatch_variables` returns a `MANUAL_MODE_REQUIRED` status, directing the agent to use `record_livewatch_variables_manual` instead. This tool presents two sequential VS Code prompts:
+**Manual Mode** (opt-in via settings): When `mcu-ai-debug.mcpRequireManualRecording` is enabled, calling `record_livewatch_variables` returns a `MANUAL_MODE_REQUIRED` status, directing the agent to use `record_livewatch_variables_manual` instead. This tool presents two sequential VS Code prompts:
 1. "Start Recording" / "Cancel" -- the user clicks Start when they are physically ready.
 2. "Stop Recording" -- the user clicks Stop after completing their hardware operation.
 
-This two-phase workflow allows engineers to precisely synchronize AI data capture with physical hardware operations (e.g., rotating a potentiometer, pressing a button, actuating a motor). Maximum wall-clock time is capped by `mcu-debug-ai.mcpManualRecordingMaxDuration` (default: 60s).
+This two-phase workflow allows engineers to precisely synchronize AI data capture with physical hardware operations (e.g., rotating a potentiometer, pressing a button, actuating a motor). Maximum wall-clock time is capped by `mcu-ai-debug.mcpManualRecordingMaxDuration` (default: 60s).
 
 ### Generated Documentation
 
-The `MCU-Debug-AI: Generate MCP Configuration for AI Agents` command produces a [mcu-debug-mcp.md](./docs/mcu-debug-mcp.md) file that serves as both a human setup guide and an AI system prompt. It contains:
+The `MCU-AI-Debug: Generate MCP Configuration for AI Agents` command produces a [mcu-debug-mcp.md](./docs/mcu-debug-mcp.md) file that serves as both a human setup guide and an AI system prompt. It contains:
 
 - Exhaustive per-tool API reference with all possible `status` codes in table format.
 - Behavioral rules that prevent agents from writing custom scrapers or parsing GDB output.
@@ -65,7 +65,7 @@ Make debugging workflows faster by adding expressions directly from the editor a
 
 ### Quick Add from Editor
 
-- While debugging with MCU-Debug, select a C/C++ expression in the editor, right-click and choose "Add to Live Watch" to push the expression into the Live Watch panel instantly. The same action is available from the Command Palette via the `Add to Live Watch` command (command id: `mcu-debug-ai.liveWatch.addSelectionToLiveWatch`).
+- While debugging with MCU-Debug, select a C/C++ expression in the editor, right-click and choose "Add to Live Watch" to push the expression into the Live Watch panel instantly. The same action is available from the Command Palette via the `Add to Live Watch` command (command id: `mcu-ai-debug.liveWatch.addSelectionToLiveWatch`).
 
 ![right_click](./packages/mcu-debug/images/right-click.png)
 
@@ -101,9 +101,9 @@ The Live Watch system includes a hardware-accelerated HTML5 Canvas rendering eng
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `mcu-debug-ai.mcpRequireManualRecording` | boolean | `false` | When enabled, automatic recording returns `MANUAL_MODE_REQUIRED` and agents must use the manual recording tool. |
-| `mcu-debug-ai.mcpRecordingMaxDuration` | number | `30` | Maximum recording duration in seconds for automatic mode. |
-| `mcu-debug-ai.mcpManualRecordingMaxDuration` | number | `60` | Maximum recording duration in seconds for manual mode. |
+| `mcu-ai-debug.mcpRequireManualRecording` | boolean | `false` | When enabled, automatic recording returns `MANUAL_MODE_REQUIRED` and agents must use the manual recording tool. |
+| `mcu-ai-debug.mcpRecordingMaxDuration` | number | `30` | Maximum recording duration in seconds for automatic mode. |
+| `mcu-ai-debug.mcpManualRecordingMaxDuration` | number | `60` | Maximum recording duration in seconds for manual mode. |
 
 ---
 
@@ -129,7 +129,7 @@ The Live Watch system includes a hardware-accelerated HTML5 Canvas rendering eng
 
 As the upstream project [`mcu-debug/mcu-debug`](https://github.com/mcu-debug/mcu-debug) is not yet available on the VS Code Marketplace and remains in a phase of rapid internal iteration, several low-level modules (such as remote proxy support and multi-core orchestration) are currently in an "unfinished" or "prototype" state.
 
-**The core philosophy of this fork (MCU-Debug-AI) is:**
+**The core philosophy of this fork (MCU-AI-Debug) is:**
 1. **Lean & Stable**: To allow developers to immediately benefit from AI (MCP) integration and UI enhancements (real-time graphing, local recording), we have proactively removed unfinished or unverified upstream components.
 2. **Production Ready**: We focus exclusively on mature, verified features to ensure that this distributed version is a stable "product" ready for daily engineering workflows.
 3. **Active Tracking**: This is not a detached fork. Once an upstream module (such as remote probe support or Capstone-based disassembly) matures and passes rigorous testing, we will merge and adapt it for AI/UI integration.

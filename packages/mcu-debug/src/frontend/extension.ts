@@ -94,11 +94,11 @@ export class MCUDebugExtension {
             vscode.commands.registerCommand("mcu-debug.liveWatch.moveUp", this.moveUpLiveWatchExpr.bind(this)),
             vscode.commands.registerCommand("mcu-debug.liveWatch.moveDown", this.moveDownLiveWatchExpr.bind(this)),
 
-            vscode.commands.registerCommand("mcu-debug-ai.liveWatch.addSelectionToLiveWatch", this.addSelectionToLiveWatch.bind(this)),
-            vscode.commands.registerCommand("mcu-debug-ai.liveWatch.startRecording", this.startLiveWatchRecording.bind(this)),
-            vscode.commands.registerCommand("mcu-debug-ai.liveWatch.stopRecording", this.stopLiveWatchRecording.bind(this)),
-            vscode.commands.registerCommand("mcu-debug-ai.liveWatch.openGraph", this.openLiveWatchGraph.bind(this)),
-            vscode.commands.registerCommand("mcu-debug-ai.generateMcpConfig", this.generateMcpConfig.bind(this)),
+            vscode.commands.registerCommand("mcu-ai-debug.liveWatch.addSelectionToLiveWatch", this.addSelectionToLiveWatch.bind(this)),
+            vscode.commands.registerCommand("mcu-ai-debug.liveWatch.startRecording", this.startLiveWatchRecording.bind(this)),
+            vscode.commands.registerCommand("mcu-ai-debug.liveWatch.stopRecording", this.stopLiveWatchRecording.bind(this)),
+            vscode.commands.registerCommand("mcu-ai-debug.liveWatch.openGraph", this.openLiveWatchGraph.bind(this)),
+            vscode.commands.registerCommand("mcu-ai-debug.generateMcpConfig", this.generateMcpConfig.bind(this)),
 
             vscode.workspace.onDidChangeConfiguration(this.settingsChanged.bind(this)),
             vscode.debug.onDidReceiveDebugSessionCustomEvent(this.receivedCustomEvent.bind(this)),
@@ -1075,9 +1075,9 @@ export class MCUDebugExtension {
             "",
             "| Setting | Type | Default | Description |",
             "|---|---|---|---|",
-            "| `mcu-debug-ai.mcpRequireManualRecording` | boolean | false | If enabled, `record_livewatch_variables` returns `MANUAL_MODE_REQUIRED` and agents must use the manual tool. |",
-            "| `mcu-debug-ai.mcpRecordingMaxDuration` | number | 30 | Max recording duration in seconds for automatic mode. |",
-            "| `mcu-debug-ai.mcpManualRecordingMaxDuration` | number | 60 | Max recording duration in seconds for manual mode. |",
+            "| `mcu-ai-debug.mcpRequireManualRecording` | boolean | false | If enabled, `record_livewatch_variables` returns `MANUAL_MODE_REQUIRED` and agents must use the manual tool. |",
+            "| `mcu-ai-debug.mcpRecordingMaxDuration` | number | 30 | Max recording duration in seconds for automatic mode. |",
+            "| `mcu-ai-debug.mcpManualRecordingMaxDuration` | number | 60 | Max recording duration in seconds for manual mode. |",
             "",
         ].join("\n");
         await vscode.workspace.fs.writeFile(vscode.Uri.file(docPath), Buffer.from(docStr, "utf8"));

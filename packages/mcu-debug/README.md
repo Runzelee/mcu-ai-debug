@@ -1,4 +1,4 @@
-# MCU-Debug-AI: Advanced MCU Debugging with AI & Real-time Visualization
+# MCU-AI-Debug: Advanced MCU Debugging with AI & Real-time Visualization
 
 High-performance MCU debugger extension with AI/MCP integration, hardware-accelerated real-time graphing, and local data recording, forked from the mcu-debug project.
 
@@ -9,10 +9,10 @@ High-performance MCU debugger extension with AI/MCP integration, hardware-accele
 Embedded MCP server that exposes debugger state to external AI agents (Copilot, Cursor, Claude Desktop, etc.) without complex scripting.
 
 ### Quick Start
-1. Run `MCU-Debug-AI: Generate MCP Configuration for AI Agents` from the Command Palette.
+1. Run `MCU-AI-Debug: Generate MCP Configuration for AI Agents` from the Command Palette.
 2. Choose a configuration format and send the generated prompt `mcu-debug-mcp.md` to your AI agent for fetching variables.
 
-![mcp](https://raw.githubusercontent.com/Runzelee/mcu-debug-ai/main/packages/mcu-debug/images/mcp.png)
+![mcp](https://raw.githubusercontent.com/Runzelee/mcu-ai-debug/main/packages/mcu-debug/images/mcp.png)
 
 ### Key AI Tools
 - `get_livewatch_variables`: Snapshot of current debug state.
@@ -29,7 +29,7 @@ Make debugging workflows faster by adding expressions directly from the editor a
 ### Quick Add from Editor
 Select a C/C++ expression in the editor, right-click and choose **"Add to Live Watch"** to push the expression into the Live Watch panel instantly.
 
-![right_click](https://raw.githubusercontent.com/Runzelee/mcu-debug-ai/main/packages/mcu-debug/images/right-click.png)
+![right_click](https://raw.githubusercontent.com/Runzelee/mcu-ai-debug/main/packages/mcu-debug/images/right-click.png)
 
 ### Local Recording (CSV / JSONL)
 Record selected variables to a local file (CSV or JSONL) with high-precision timestamps. Supports automatic sanitization of GDB value formats.
@@ -44,13 +44,13 @@ Hardware-accelerated HTML5 Canvas rendering engine for real-time variable visual
 - **Oscilloscope Auto-scroll**: Real-time scrolling with manual "PAN MODE" for history navigation.
 - **Precision Zoom**: Dedicated sliders and mouse wheel support for Time and Y axes.
 
-![live_watch_graph](https://raw.githubusercontent.com/Runzelee/mcu-debug-ai/main/packages/mcu-debug/images/live-watch-graph.png)
+![live_watch_graph](https://raw.githubusercontent.com/Runzelee/mcu-ai-debug/main/packages/mcu-debug/images/live-watch-graph.png)
 
 ---
 
 ## 4. Relationship with Upstream
 
-**MCU-Debug-AI** is a stable, production-ready fork of the `mcu-debug` project.
+**MCU-AI-Debug** is a stable, production-ready fork of the `mcu-debug` project.
 - **Lean & Stable**: Only mature, verified features are included to ensure a reliable engineering workflow.
 - **AI-First**: Deep integration with Model Context Protocol (MCP) for modern AI-assisted debugging.
 - **Enhanced UI**: Built-in high-performance visualization tools not found in the upstream.

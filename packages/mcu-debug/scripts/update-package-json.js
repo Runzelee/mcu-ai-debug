@@ -57,19 +57,19 @@ function generateConfiguration() {
         ...createPlatformProps("PEGDBServerPath", "Path to the PE Micro GDB Server. If not set, the extension will look in the system path."),
     };
 
-    // Group 4: MCP AI Integration (Using mcu-debug-ai prefix)
+    // Group 4: MCP AI Integration (Using mcu-ai-debug prefix)
     const mcpProperties = {
-        "mcu-debug-ai.mcpRequireManualRecording": {
+        "mcu-ai-debug.mcpRequireManualRecording": {
             type: "boolean",
             default: false,
             description: "If enabled, AI Agent recording requests require manual user confirmation (Start/Stop) instead of running for a fixed duration. Useful for synchronizing data capture with physical hardware operations.",
         },
-        "mcu-debug-ai.mcpRecordingMaxDuration": {
+        "mcu-ai-debug.mcpRecordingMaxDuration": {
             type: "number",
             default: 30,
             description: "Maximum allowed recording duration (in seconds) for AI agents in automatic mode.",
         },
-        "mcu-debug-ai.mcpManualRecordingMaxDuration": {
+        "mcu-ai-debug.mcpManualRecordingMaxDuration": {
             type: "number",
             default: 60,
             description: "Maximum allowed recording duration (in seconds) for AI agents in manual mode. Should be >= mcpRecordingMaxDuration to account for human reaction time.",
