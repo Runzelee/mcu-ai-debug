@@ -2,45 +2,9 @@
 
 This readme covers the major capabilities added to the `mcu-debug` VS Code extension, including editor integration for quick Live Watch additions, local recording to common file formats, a high-performance real-time graphing engine, and a Model Context Protocol (MCP) bridge for AI agent interoperability.
 
-## 1. Editor integration & Local Recording
-
-Make debugging workflows faster by adding expressions directly from the editor and recording Live Watch data to local files.
-
-### Quick Add from Editor
-
-- While debugging with MCU-Debug, select a C/C++ expression in the editor, right-click and choose "Add to Live Watch" to push the expression into the Live Watch panel instantly. The same action is available from the Command Palette via the `Add to Live Watch` command (command id: `mcu-debug-ai.liveWatch.addSelectionToLiveWatch`).
-
-![right_click](./packages/mcu-debug/images/right-click.png)
-
-### Local Recording (CSV / JSONL)
-
-- The Live Watch supports recording selected leaf variables to a local file. Click the `Start Recording` / `Stop Recording` icon from the Live Watch view or run form the Command Palette — a Save dialog lets you choose `.csv` or `.jsonl` (newline-delimited JSON).
-- CSV files include a header row `Timestamp` plus quoted variable names; JSONL produces one JSON object per line with a `timestamp` field and the variables as keys. The recorder sanitizes common GDB value formats (char literals, enum assignments) to numeric/string values and caches last-known values so each recorded row contains a value for every selected column.
-
-### Quick usage
-
-- Add expressions from the editor (right-click → "Add to Live Watch").
-- Run `Start Recording` from the Live Watch view; select variables and a file path when prompted.
-- Stop recording with `Stop Recording` (command or UI). The file will contain a timestamped timeseries in your chosen format.
-
 ---
 
-## 2. High-Performance Canvas 2D Live Grapher
-
-The Live Watch system includes a hardware-accelerated HTML5 Canvas rendering engine for real-time variable visualization.
-
-### Features
-
-- **Dual Display Modes**: Switch between "Split Mode" (one graph per variable with independent Y-axes) and "Overlay Mode" (all variables on a shared Y-axis).
-- **Oscilloscope Auto-scroll**: By default, the graph behaves like a real-time oscilloscope, automatically scrolling to show the latest data. Users can break into manual "PAN MODE" for free-form navigation of historical data.
-- **T and Y Sliders**: Dedicated slider controls on the right and bottom edges allow precise zooming of the Time and Y axes. Mouse wheel zooming is also supported and synchronized with the sliders.
-- **Robust Rendering**: Strict Canvas `ctx.clip()` clipping prevents all label bleeding and border artifacts in both Split and Overlay modes.
-
-![live_watch_graph](./packages/mcu-debug/images/live-watch-graph.png)
-
----
-
-## 3. Model Context Protocol (MCP) Server
+## 1. Model Context Protocol (MCP) Server
 
 The extension hosts an embedded MCP server that exposes debugger state to external AI agents (Copilot, Antigravity, Cursor, Claude Desktop, etc.) without requiring Python environments, GDB scripting, or memory dump parsing.
 
@@ -86,12 +50,50 @@ This two-phase workflow allows engineers to precisely synchronize AI data captur
 
 ### Generated Documentation
 
-The `MCU-Debug-AI: Generate MCP Configuration for AI Agents` command produces a [mcu-debug-mcp.md](./mcu-debug-mcp.md) file that serves as both a human setup guide and an AI system prompt. It contains:
+The `MCU-Debug-AI: Generate MCP Configuration for AI Agents` command produces a [mcu-debug-mcp.md](./docs/mcu-debug-mcp.md) file that serves as both a human setup guide and an AI system prompt. It contains:
 
 - Exhaustive per-tool API reference with all possible `status` codes in table format.
 - Behavioral rules that prevent agents from writing custom scrapers or parsing GDB output.
 - Cross-referencing logic between automatic and manual recording tools.
 - VS Code settings reference table.
+
+---
+
+## 2. Editor integration & Local Recording
+
+Make debugging workflows faster by adding expressions directly from the editor and recording Live Watch data to local files.
+
+### Quick Add from Editor
+
+- While debugging with MCU-Debug, select a C/C++ expression in the editor, right-click and choose "Add to Live Watch" to push the expression into the Live Watch panel instantly. The same action is available from the Command Palette via the `Add to Live Watch` command (command id: `mcu-debug-ai.liveWatch.addSelectionToLiveWatch`).
+
+![right_click](./packages/mcu-debug/images/right-click.png)
+
+### Local Recording (CSV / JSONL)
+
+- The Live Watch supports recording selected leaf variables to a local file. Click the `Start Recording` / `Stop Recording` icon from the Live Watch view or run form the Command Palette — a Save dialog lets you choose `.csv` or `.jsonl` (newline-delimited JSON).
+- CSV files include a header row `Timestamp` plus quoted variable names; JSONL produces one JSON object per line with a `timestamp` field and the variables as keys. The recorder sanitizes common GDB value formats (char literals, enum assignments) to numeric/string values and caches last-known values so each recorded row contains a value for every selected column.
+
+### Quick usage
+
+- Add expressions from the editor (right-click → "Add to Live Watch").
+- Run `Start Recording` from the Live Watch view; select variables and a file path when prompted.
+- Stop recording with `Stop Recording` (command or UI). The file will contain a timestamped timeseries in your chosen format.
+
+---
+
+## 3. High-Performance Canvas 2D Live Grapher
+
+The Live Watch system includes a hardware-accelerated HTML5 Canvas rendering engine for real-time variable visualization.
+
+### Features
+
+- **Dual Display Modes**: Switch between "Split Mode" (one graph per variable with independent Y-axes) and "Overlay Mode" (all variables on a shared Y-axis).
+- **Oscilloscope Auto-scroll**: By default, the graph behaves like a real-time oscilloscope, automatically scrolling to show the latest data. Users can break into manual "PAN MODE" for free-form navigation of historical data.
+- **T and Y Sliders**: Dedicated slider controls on the right and bottom edges allow precise zooming of the Time and Y axes. Mouse wheel zooming is also supported and synchronized with the sliders.
+- **Robust Rendering**: Strict Canvas `ctx.clip()` clipping prevents all label bleeding and border artifacts in both Split and Overlay modes.
+
+![live_watch_graph](./packages/mcu-debug/images/live-watch-graph.png)
 
 ---
 

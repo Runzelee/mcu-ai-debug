@@ -1,10 +1,28 @@
 # MCU-Debug-AI: Advanced MCU Debugging with AI & Real-time Visualization
 
-High-performance MCU debugger extension with AI/MCP integration, hardware-accelerated real-time graphing, and local data recording.
+High-performance MCU debugger extension with AI/MCP integration, hardware-accelerated real-time graphing, and local data recording, forked from the mcu-debug project.
 
 ---
 
-## 1. Editor Integration & Local Recording
+## 1. Model Context Protocol (MCP) Server
+
+Embedded MCP server that exposes debugger state to external AI agents (Copilot, Cursor, Claude Desktop, etc.) without complex scripting.
+
+### Quick Start
+1. Run `MCU-Debug-AI: Generate MCP Configuration for AI Agents` from the Command Palette.
+2. Choose a configuration format and send the generated prompt `mcu-debug-mcp.md` to your AI agent for fetching variables.
+
+![mcp](https://raw.githubusercontent.com/Runzelee/mcu-debug-ai/main/packages/mcu-debug/images/mcp.png)
+
+### Key AI Tools
+- `get_livewatch_variables`: Snapshot of current debug state.
+- `add_livewatch_variable`: Add expressions via AI.
+- `record_livewatch_variables`: AI-driven data capture for a fixed duration.
+- `record_livewatch_variables_manual`: AI-driven data capture with user-controlled Start/Stop buttons.
+
+---
+
+## 2. Editor Integration & Local Recording
 
 Make debugging workflows faster by adding expressions directly from the editor and recording Live Watch data to local files.
 
@@ -18,7 +36,7 @@ Record selected variables to a local file (CSV or JSONL) with high-precision tim
 
 ---
 
-## 2. High-Performance Real-time Grapher
+## 3. High-Performance Real-time Grapher
 
 Hardware-accelerated HTML5 Canvas rendering engine for real-time variable visualization.
 
@@ -30,27 +48,10 @@ Hardware-accelerated HTML5 Canvas rendering engine for real-time variable visual
 
 ---
 
-## 3. Model Context Protocol (MCP) Server
-
-Embedded MCP server that exposes debugger state to external AI agents (Copilot, Cursor, Claude Desktop, etc.) without complex scripting.
-
-### Quick Start
-1. Run `MCU-Debug-AI: Generate MCP Configuration for AI Agents` from the Command Palette.
-2. Choose a configuration format and follow the generated setup guide (`mcu-debug-mcp.md`).
-
-![mcp](https://raw.githubusercontent.com/Runzelee/mcu-debug-ai/main/packages/mcu-debug/images/mcp.png)
-
-### Key AI Tools
-- `get_livewatch_variables`: Snapshot of current debug state.
-- `add_livewatch_variable`: Add expressions via AI.
-- `record_livewatch_variables`: AI-driven data capture (Automatic or Manual-synchronized modes).
-
----
-
 ## 4. Relationship with Upstream
 
-**MCU-Debug-AI** is a stable, production-ready fork of the `mcu-debug` project. Our focus is:
-- **Lean & Stable**: We include only mature, verified features to ensure a reliable engineering workflow.
+**MCU-Debug-AI** is a stable, production-ready fork of the `mcu-debug` project.
+- **Lean & Stable**: Only mature, verified features are included to ensure a reliable engineering workflow.
 - **AI-First**: Deep integration with Model Context Protocol (MCP) for modern AI-assisted debugging.
 - **Enhanced UI**: Built-in high-performance visualization tools not found in the upstream.
 

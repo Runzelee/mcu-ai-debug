@@ -41,26 +41,8 @@ function getItemHtml(item) {
                 </div>
             `;
         }
-
-        // Improve Check: We need to know if it's top level to show full actions.
-        // In renderChildren we know 'parent'. In updateItems we might not know context easily,
-        // but typically 'updateItems' is for values.
-        // Let's rely on checking if it has a parent in the DOM or itemMap if we want perfect fidelity,
-        // but for now let's reuse the logic from renderChildren slightly more generally.
-
-        // Actually, the original logic had specialized actions for "Top-level and not dummy".
-        // "Top-level" meant !parent in renderChildren.
-        // In updateItems, we just update content. We can assume the structure (actions) doesn't change wildly
-        // OR we can try to preserve the actions logic.
-
-        // Simplification: The actions HTML generation logic relies on 'parent'.
-        // If we want to extract this, we need 'parent' info.
-        // ItemMap items don't store parent ref currently.
-        // Let's update itemMap to store parentId?
     }
 
-    // START RE-INLINE
-    // To cleanly refactor without breaking the parent check logic, I will pass 'isTopLevel' to the helper.
     return "";
 }
 
@@ -136,9 +118,6 @@ function updateItems(items) {
             if (li) {
                 const contentDiv = li.querySelector(".tree-content");
                 if (contentDiv) {
-                    // Determine if top level.
-                    // renderChildren logic: !parent.
-                    // Here we check if li.parentElement is #tree-root > ul
                     const isTopLevel = li.parentElement && li.parentElement.parentElement && li.parentElement.parentElement.id === "tree-root";
                     const newHtml = generateItemContentHtml(existingItem, isTopLevel);
                     if (contentDiv.innerHTML !== newHtml) {
@@ -154,7 +133,6 @@ function renderChildren(parent, children) {
     const container = parent ? document.getElementById("children-" + parent.id) : document.getElementById("tree-root");
     if (!container) return;
 
-    // container.innerHTML = ""; // Removing full wipe to prevent shimmering
     let ul = container.querySelector("ul");
     if (!ul) {
         ul = document.createElement("ul");
@@ -190,7 +168,6 @@ function renderChildren(parent, children) {
         const isTopLevel = !parent;
         const newHtml = generateItemContentHtml(item, isTopLevel);
 
-        // Only update DOM if content changed
         if (contentDiv.innerHTML !== newHtml) {
             contentDiv.innerHTML = newHtml;
         }
@@ -206,7 +183,6 @@ function renderChildren(parent, children) {
                     requestChildren(item);
                 }
             } else {
-                // If it exists and is expanded, we continue the refresh cascade
                 if (item.expanded) {
                     requestChildren(item);
                 }
@@ -215,24 +191,15 @@ function renderChildren(parent, children) {
             if (childContainer) childContainer.remove();
         }
 
-        // Ensure order
         ul.appendChild(li);
     });
 
-    // Remove deleted nodes
     existingLiMap.forEach((li, id) => {
         if (!keepIds.has(id)) li.remove();
     });
 }
 
-// Primitive Edit Logic - using floating overlay to survive rapid DOM updates
 window.startEdit = (element, id, field) => {
-    // Remove any existing floating editor
-    const existingEditor = document.querySelector(".floating-editor");
-    const existingBackdrop = document.querySelector(".floating-editor-backdrop");
-    if (existingEditor) existingEditor.remove();
-    if (existingBackdrop) existingBackdrop.remove();
-
     let currentVal = element.innerText;
     if (field === "value") {
         const item = itemMap.get(id);
@@ -240,78 +207,12 @@ window.startEdit = (element, id, field) => {
             currentVal = item.actualValue;
         }
     }
-
-    // Create backdrop
-    const backdrop = document.createElement("div");
-    backdrop.className = "floating-editor-backdrop";
-    document.body.appendChild(backdrop);
-
-    // Create floating editor
-    const editor = document.createElement("div");
-    editor.className = "floating-editor";
-
-    // Add title
-    const title = document.createElement("div");
-    title.className = "floating-editor-title";
-    title.textContent = field === "label" ? "Edit Expression" : "Edit Value";
-    editor.appendChild(title);
-
-    const input = document.createElement("input");
-    input.type = "text";
-    input.value = currentVal;
-
-    editor.appendChild(input);
-    document.body.appendChild(editor);
-
-    // Position at top center like startAdd
-    editor.style.left = "50%";
-    editor.style.top = "20px";
-    editor.style.transform = "translateX(-50%)";
-    editor.style.minWidth = "300px";
-
-    let cancelled = false;
-
-    const cleanup = () => {
-        editor.remove();
-        backdrop.remove();
-    };
-
-    const commit = () => {
-        if (!cancelled && input.value !== currentVal) {
-            vscode.postMessage({ type: "edit", item: { id }, field: field, value: input.value });
-        }
-        cleanup();
-    };
-
-    input.onblur = () => {
-        // Blur means focus lost - treat as cancel
-        cancelled = true;
-        cleanup();
-    };
-
-    input.onkeydown = (e) => {
-        if (e.key === "Enter") {
-            commit();
-        } else if (e.key === "Escape") {
-            cancelled = true;
-            cleanup();
-        }
-    };
-
-    backdrop.onclick = () => {
-        cancelled = true;
-        cleanup();
-    };
-
-    input.focus();
-    input.select();
+    vscode.postMessage({ type: "beginEdit", item: { id }, field: field, value: currentVal });
 };
 
-// create a dropdown for format selection
 window.selectFormat = (event, id) => {
     event.stopPropagation();
 
-    // Remove existing menus if any
     const existing = document.querySelector(".context-menu");
     if (existing) existing.remove();
 
@@ -339,12 +240,10 @@ window.selectFormat = (event, id) => {
 
     document.body.appendChild(menu);
 
-    // Positioning logic
     const rect = menu.getBoundingClientRect();
     let x = event.clientX;
     let y = event.clientY;
 
-    // Boundary check
     if (x + rect.width > window.innerWidth) {
         x = window.innerWidth - rect.width;
     }
@@ -355,7 +254,6 @@ window.selectFormat = (event, id) => {
     menu.style.left = x + "px";
     menu.style.top = y + "px";
 
-    // Click outside to close
     const closeMenu = (e) => {
         if (!menu.contains(e.target)) {
             menu.remove();
@@ -364,7 +262,6 @@ window.selectFormat = (event, id) => {
         }
     };
 
-    // Use setTimeout to avoid immediate trigger by the current click event
     setTimeout(() => {
         document.addEventListener("click", closeMenu);
         document.addEventListener("contextmenu", closeMenu);
@@ -372,76 +269,9 @@ window.selectFormat = (event, id) => {
 };
 
 function startAdd() {
-    // Remove any existing floating editor
-    const existingEditor = document.querySelector(".floating-editor");
-    const existingBackdrop = document.querySelector(".floating-editor-backdrop");
-    if (existingEditor) existingEditor.remove();
-    if (existingBackdrop) existingBackdrop.remove();
-
-    // Create backdrop
-    const backdrop = document.createElement("div");
-    backdrop.className = "floating-editor-backdrop";
-    document.body.appendChild(backdrop);
-
-    // Create floating editor
-    const editor = document.createElement("div");
-    editor.className = "floating-editor";
-    // Add title
-    const title = document.createElement("div");
-    title.className = "floating-editor-title";
-    title.textContent = "Add New Expression";
-    editor.appendChild(title);
-    const input = document.createElement("input");
-    input.type = "text";
-    input.placeholder = "Expression";
-
-    editor.appendChild(input);
-    document.body.appendChild(editor);
-
-    // Position at top center of viewport
-    editor.style.left = "50%";
-    editor.style.top = "20px";
-    editor.style.transform = "translateX(-50%)";
-    editor.style.minWidth = "300px";
-
-    let cancelled = false;
-
-    const cleanup = () => {
-        editor.remove();
-        backdrop.remove();
-    };
-
-    const commit = () => {
-        if (!cancelled && input.value) {
-            vscode.postMessage({ type: "add", value: input.value });
-        }
-        cleanup();
-    };
-
-    input.onblur = () => {
-        // Blur means focus lost - treat as cancel
-        cancelled = true;
-        cleanup();
-    };
-
-    input.onkeydown = (e) => {
-        if (e.key === "Enter") {
-            commit();
-        } else if (e.key === "Escape") {
-            cancelled = true;
-            cleanup();
-        }
-    };
-
-    backdrop.onclick = () => {
-        cancelled = true;
-        cleanup();
-    };
-
-    input.focus();
+    vscode.postMessage({ type: "addRequested" });
 }
 
-// Helper functions for action buttons to find and edit the correct element
 window.editLabel = (event, id) => {
     event.stopPropagation();
     const treeContent = event.target.closest(".tree-content");
@@ -495,5 +325,4 @@ window.deleteItem = (e, id) => {
     vscode.postMessage({ type: "delete", item: { id } });
 };
 
-// Initial load
 requestChildren();

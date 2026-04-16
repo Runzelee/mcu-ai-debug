@@ -33,8 +33,15 @@ export class EditableTreeViewProvider implements vscode.WebviewViewProvider {
         private readonly _delegate: TreeViewProviderDelegate,
     ) {}
 
-    public add() {
-        this._view?.webview.postMessage({ type: "newItem" });
+    public async add() {
+        const value = await vscode.window.showInputBox({
+            prompt: "Add new expression to Live Watch",
+            placeHolder: "Expression"
+        });
+        if (value && this._delegate.onAdd) {
+            await this._delegate.onAdd(value);
+            this.refresh();
+        }
     }
 
     public resolveWebviewView(webviewView: vscode.WebviewView, context: vscode.WebviewViewResolveContext, _token: vscode.CancellationToken) {
@@ -53,6 +60,21 @@ export class EditableTreeViewProvider implements vscode.WebviewViewProvider {
                     const children = await this._delegate.getChildren(data.element);
                     this._view?.webview.postMessage({ type: "setChildren", element: data.element, children });
                     break;
+                case "beginEdit":
+                    const fieldName = data.field === "label" ? "Expression" : "Value";
+                    const newValue = await vscode.window.showInputBox({
+                        prompt: `Edit ${fieldName}`,
+                        value: data.value
+                    });
+                    if (newValue !== undefined) {
+                        if (data.field === "label") {
+                            await this._delegate.onEditName(data.item, newValue);
+                        } else {
+                            await this._delegate.onEditValue(data.item, newValue);
+                        }
+                        this.refresh();
+                    }
+                    break;
                 case "edit":
                     if (data.field && data.field === "label") {
                         await this._delegate.onEditName(data.item, data.value);
@@ -66,6 +88,9 @@ export class EditableTreeViewProvider implements vscode.WebviewViewProvider {
                         await this._delegate.onAdd(data.value);
                         this.refresh();
                     }
+                    break;
+                case "addRequested":
+                    await this.add();
                     break;
                 case "delete":
                     if (this._delegate.onDelete) {
