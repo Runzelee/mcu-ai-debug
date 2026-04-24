@@ -95,6 +95,7 @@ export class MCUDebugExtension {
             vscode.commands.registerCommand("mcu-debug.liveWatch.moveDown", this.moveDownLiveWatchExpr.bind(this)),
 
             vscode.commands.registerCommand("mcu-ai-debug.liveWatch.addSelectionToLiveWatch", this.addSelectionToLiveWatch.bind(this)),
+            vscode.commands.registerCommand("mcu-ai-debug.liveWatch.saveSnapshot", this.saveLiveWatchSnapshot.bind(this)),
             vscode.commands.registerCommand("mcu-ai-debug.liveWatch.startRecording", this.startLiveWatchRecording.bind(this)),
             vscode.commands.registerCommand("mcu-ai-debug.liveWatch.stopRecording", this.stopLiveWatchRecording.bind(this)),
             vscode.commands.registerCommand("mcu-ai-debug.liveWatch.openGraph", this.openLiveWatchGraph.bind(this)),
@@ -860,6 +861,10 @@ export class MCUDebugExtension {
 
     private startLiveWatchRecording() {
         this.liveWatchProvider.startRecording();
+    }
+
+    private saveLiveWatchSnapshot() {
+        this.liveWatchProvider.saveSnapshot();
     }
 
     private stopLiveWatchRecording() {

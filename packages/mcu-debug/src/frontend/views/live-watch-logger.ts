@@ -63,6 +63,35 @@ export class LiveWatchLogger {
         vscode.commands.executeCommand("setContext", "mcu-debug:isLiveWatchRecording", true);
     }
 
+    public async saveSnapshot(variables: { [key: string]: string }) {
+        const uri = await vscode.window.showSaveDialog({
+            title: "Save Live Watch Snapshot",
+            filters: {
+                "JSON Files": ["json"],
+            },
+            saveLabel: "Save Snapshot",
+        });
+
+        if (!uri) {
+            return;
+        }
+
+        const sanitizedVariables: { [key: string]: string } = {};
+        for (const [key, value] of Object.entries(variables)) {
+            sanitizedVariables[key] = this.sanitizeValue(value);
+        }
+
+        const payload = {
+            timestamp: Date.now(),
+            isoTime: new Date().toISOString(),
+            variable_count: Object.keys(sanitizedVariables).length,
+            variables: sanitizedVariables,
+        };
+
+        await fs.promises.writeFile(uri.fsPath, JSON.stringify(payload, null, 2) + "\n", "utf8");
+        vscode.window.showInformationMessage("Live Watch snapshot saved as JSON.");
+    }
+
     /**
      * Normalize raw strings returned by GDB.
      * GDB returns char/int8_t/uint8_t types in formats like `-1 '\\377'` or `65 'A'`,

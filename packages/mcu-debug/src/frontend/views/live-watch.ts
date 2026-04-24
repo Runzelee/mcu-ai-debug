@@ -859,6 +859,28 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
         }
     }
 
+    public async saveSnapshot() {
+        if (!LiveWatchTreeProvider.session) {
+            vscode.window.showInformationMessage("No active debug session. Start debugging before saving a Live Watch snapshot.");
+            return;
+        }
+
+        const items = this.gatherLeafExprs();
+        if (items.length === 0) {
+            vscode.window.showInformationMessage("No valid variables to snapshot. Add variables to Live Watch and expand structs first.");
+            return;
+        }
+
+        const selected = await vscode.window.showQuickPick(items, {
+            canPickMany: true,
+            placeHolder: "Select variables to snapshot..."
+        });
+
+        if (selected && selected.length > 0) {
+            await LiveWatchLogger.getInstance().saveSnapshot(this.gatherSnapshotData(selected));
+        }
+    }
+
     public stopRecording() {
         LiveWatchLogger.getInstance().stopRecording();
     }
@@ -870,13 +892,13 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
     /**
      * Collect all leaf-node expressions for use by the Grapher and the recorder.
      */
-    public gatherLeafExprs(): string[] {
+    private gatherLeafNodes(): LiveVariableNode[] {
         const gatherNodes = (node: LiveVariableNode): LiveVariableNode[] => {
             let res: LiveVariableNode[] = [];
             const actualChildren = node.getChildren();
             const hasLoadedChildren = actualChildren && actualChildren.length > 0 && actualChildren[0].getName() !== "dummy";
             const isCompound = node.variablesReference > 0 || hasLoadedChildren;
-            
+
             if (node !== this.rootNode && !isCompound && !node.isDummyNode()) {
                 res.push(node);
             }
@@ -887,7 +909,26 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
             }
             return res;
         };
-        return gatherNodes(this.rootNode).map(n => n.getExpr()).filter(e => e);
+
+        return gatherNodes(this.rootNode);
+    }
+
+    public gatherLeafExprs(): string[] {
+        return this.gatherLeafNodes().map(n => n.getExpr()).filter(e => e);
+    }
+
+    public gatherSnapshotData(selectedExprs: string[]): { [key: string]: string } {
+        const snapshot: { [key: string]: string } = {};
+        const selectedSet = new Set(selectedExprs);
+
+        for (const node of this.gatherLeafNodes()) {
+            const expr = node.getExpr();
+            if (expr && selectedSet.has(expr)) {
+                snapshot[expr] = node.getDisplayValue();
+            }
+        }
+
+        return snapshot;
     }
 
     // --- End WebView Delegate ---

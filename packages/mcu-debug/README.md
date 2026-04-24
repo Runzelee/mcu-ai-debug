@@ -22,14 +22,17 @@ Embedded MCP server that exposes debugger state to external AI agents (Copilot, 
 
 ---
 
-## 2. Editor Integration & Local Recording
+## 2. Editor Integration, Snapshots & Local Recording
 
-Make debugging workflows faster by adding expressions directly from the editor and recording Live Watch data to local files.
+Make debugging workflows faster by adding expressions directly from the editor, exporting one-shot JSON snapshots, and recording Live Watch data to local files.
 
 ### Quick Add from Editor
 Select a C/C++ expression in the editor, right-click and choose **"Add to Live Watch"** to push the expression into the Live Watch panel instantly.
 
 ![right_click](https://raw.githubusercontent.com/Runzelee/mcu-ai-debug/main/packages/mcu-debug/images/right-click.png)
+
+### Live Watch Snapshot (JSON)
+Use the same leaf-variable picker as recording, then export the selected Live Watch values to a `.json` file with `timestamp`, `isoTime`, `variable_count`, and a `variables` object keyed by expression.
 
 ### Local Recording (CSV / JSONL)
 Record selected variables to a local file (CSV or JSONL) with high-precision timestamps. Supports automatic sanitization of GDB value formats.

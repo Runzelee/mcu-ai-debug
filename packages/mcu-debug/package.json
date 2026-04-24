@@ -469,6 +469,12 @@
       },
       {
         "category": "MCU-AI-Debug",
+        "command": "mcu-ai-debug.liveWatch.saveSnapshot",
+        "title": "Save Snapshot",
+        "icon": "$(save)"
+      },
+      {
+        "category": "MCU-AI-Debug",
         "command": "mcu-ai-debug.liveWatch.startRecording",
         "title": "Start Recording",
         "icon": "$(record)"
@@ -3571,6 +3577,11 @@
       "view/title": [
         {
           "command": "mcu-debug.liveWatch.addExpr",
+          "when": "view == mcu-debug.liveWatch",
+          "group": "navigation"
+        },
+        {
+          "command": "mcu-ai-debug.liveWatch.saveSnapshot",
           "when": "view == mcu-debug.liveWatch",
           "group": "navigation"
         },

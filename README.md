@@ -59,15 +59,21 @@ The `MCU-AI-Debug: Generate MCP Configuration for AI Agents` command produces a 
 
 ---
 
-## 2. Editor integration & Local Recording
+## 2. Editor integration, Snapshots & Local Recording
 
-Make debugging workflows faster by adding expressions directly from the editor and recording Live Watch data to local files.
+Make debugging workflows faster by adding expressions directly from the editor, saving one-shot JSON snapshots, and recording Live Watch data to local files.
 
 ### Quick Add from Editor
 
 - While debugging with MCU-Debug, select a C/C++ expression in the editor, right-click and choose "Add to Live Watch" to push the expression into the Live Watch panel instantly. The same action is available from the Command Palette via the `Add to Live Watch` command (command id: `mcu-ai-debug.liveWatch.addSelectionToLiveWatch`).
 
 ![right_click](./packages/mcu-debug/images/right-click.png)
+
+### Live Watch Snapshot (JSON)
+
+- The Live Watch view now includes a `Save Snapshot` action that first shows the same leaf-variable picker used by recording, then exports the selected values to a `.json` file.
+- Snapshots include `timestamp`, `isoTime`, `variable_count`, and a `variables` object keyed by expression.
+- Only selected leaf variables are exported, so structs/arrays must be expanded first just like recording.
 
 ### Local Recording (CSV / JSONL)
 
@@ -77,6 +83,7 @@ Make debugging workflows faster by adding expressions directly from the editor a
 ### Quick usage
 
 - Add expressions from the editor (right-click → "Add to Live Watch").
+- Run `Save Snapshot` from the Live Watch view, select the leaf variables you want, then export them to JSON.
 - Run `Start Recording` from the Live Watch view; select variables and a file path when prompted.
 - Stop recording with `Stop Recording` (command or UI). The file will contain a timestamped timeseries in your chosen format.
 
