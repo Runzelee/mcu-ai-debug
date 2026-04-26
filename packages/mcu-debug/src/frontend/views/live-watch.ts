@@ -854,7 +854,8 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
         });
 
         if (selected && selected.length > 0) {
-            await logger.startRecording(selected);
+            const initialValues = this.gatherSnapshotData(selected);
+            await logger.startRecording(selected, initialValues);
             this.refresh();
         }
     }

@@ -31,7 +31,7 @@ export class LiveWatchLogger {
         return this.recordedKeys;
     }
 
-    public async startRecording(keys: string[]) {
+    public async startRecording(keys: string[], initialValues?: { [key: string]: string }) {
         if (this.isRecordingFlag) {
             return;
         }
@@ -58,6 +58,10 @@ export class LiveWatchLogger {
         if (this.logFormat === "csv") {
             const header = ["Timestamp", ...keys].map((k) => `"${k}"`).join(",");
             this.writeStream.write(header + "\n");
+        }
+
+        if (initialValues) {
+            this.record(Date.now(), initialValues);
         }
 
         vscode.commands.executeCommand("setContext", "mcu-debug:isLiveWatchRecording", true);
