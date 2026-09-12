@@ -1,7 +1,7 @@
 {
   "name": "mcu-ai-debug",
   "publisher": "Runzelee",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "preview": false,
   "description": "High-performance MCU debugger with AI/MCP integration, real-time graphing, and local recording.",
   "displayName": "MCU-AI-Debug",

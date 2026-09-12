@@ -1,5 +1,9 @@
 name: Package Extensions
 
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     tags:
@@ -80,6 +84,15 @@ jobs:
         run: |
           npm install
 
+      - name: Verify release tag matches extension version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          expected_tag="v$(node -p "require('./packages/mcu-debug/package.json').version")"
+          if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match extension version $expected_tag"
+            exit 1
+          fi
+
       - name: Download All Binaries
         uses: actions/download-artifact@v4
         with:
@@ -88,15 +101,15 @@ jobs:
       - name: Consolidate Binaries
         run: |
           mkdir -p packages/mcu-debug/bin
-          
+
           echo "Downloaded artifacts structure:"
           ls -R bin-artifacts/
-          
+
           # Copy binaries from the platform-specific artifact directories back to packages/mcu-debug/bin
           # The -a flag is used to preserve attributes and copy recursively
           cp -a bin-artifacts/binaries-linux-windows/. packages/mcu-debug/bin/ || true
           cp -a bin-artifacts/binaries-darwin/. packages/mcu-debug/bin/ || true
-          
+
           echo "Final consolidated binary structure:"
           ls -R packages/mcu-debug/bin/
 
@@ -108,6 +121,39 @@ jobs:
           CI: true
           SKIP_RUST_BUILD: true
 
+      - name: Verify Unified VSIX
+        shell: bash
+        run: |
+          shopt -s nullglob
+          vsix_files=(dist/*.vsix)
+          if [[ ${#vsix_files[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one VSIX in dist/, found ${#vsix_files[@]}"
+            exit 1
+          fi
+
+          entries="$(unzip -Z1 "${vsix_files[0]}")"
+          required_binaries=(
+            extension/bin/darwin-arm64/mcu-debug-helper
+            extension/bin/darwin-x64/mcu-debug-helper
+            extension/bin/linux-arm64/mcu-debug-helper
+            extension/bin/linux-x64/mcu-debug-helper
+            extension/bin/win32-x64/mcu-debug-helper.exe
+          )
+          for binary in "${required_binaries[@]}"; do
+            if ! grep -Fxq "$binary" <<< "$entries"; then
+              echo "::error::Unified VSIX is missing $binary"
+              exit 1
+            fi
+          done
+
+      - name: Upload VSIX Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcu-ai-debug-vsix
+          path: dist/*.vsix
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -118,3 +164,75 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-vscode-marketplace:
+    name: Publish to VS Code Marketplace
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Download VSIX Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mcu-ai-debug-vsix
+          path: dist
+
+      - name: Publish Exact VSIX
+        shell: bash
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [[ -z "$VSCE_PAT" ]]; then
+            echo "::notice::Repository secret VSCE_PAT is not configured; skipping VS Code Marketplace publishing"
+            exit 0
+          fi
+          shopt -s nullglob
+          vsix_files=(dist/*.vsix)
+          if [[ ${#vsix_files[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one downloaded VSIX, found ${#vsix_files[@]}"
+            exit 1
+          fi
+          npx --yes @vscode/vsce@3.9.2 publish --packagePath "${vsix_files[0]}"
+
+  publish-open-vsx:
+    name: Publish to Open VSX
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Download VSIX Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mcu-ai-debug-vsix
+          path: dist
+
+      - name: Publish Exact VSIX
+        shell: bash
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [[ -z "$OVSX_PAT" ]]; then
+            echo "::error::Repository secret OVSX_PAT is not configured"
+            exit 1
+          fi
+          shopt -s nullglob
+          vsix_files=(dist/*.vsix)
+          if [[ ${#vsix_files[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one downloaded VSIX, found ${#vsix_files[@]}"
+            exit 1
+          fi
+          npx --yes ovsx@1.2.0 publish "${vsix_files[0]}"
