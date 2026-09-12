@@ -3,6 +3,86 @@ body {
     color: var(--vscode-foreground);
     font-family: var(--vscode-font-family);
 }
+[hidden] {
+    display: none !important;
+}
+.batch-toolbar {
+    padding: 8px;
+    border-bottom: 1px solid var(--vscode-panel-border);
+    background: var(--vscode-sideBar-background);
+}
+.batch-toolbar label {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 11px;
+}
+.batch-toolbar textarea {
+    box-sizing: border-box;
+    width: 100%;
+    resize: vertical;
+    padding: 5px;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, transparent);
+    font-family: var(--vscode-editor-font-family);
+}
+.batch-toolbar textarea:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+}
+.batch-add-list {
+    display: grid;
+    gap: 2px;
+    max-height: 120px;
+    margin-top: 5px;
+    overflow: auto;
+}
+.batch-add-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    padding: 2px;
+}
+.batch-add-item:hover {
+    background: var(--vscode-list-hoverBackground);
+}
+.batch-add-item span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.batch-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+}
+.batch-actions button {
+    padding: 3px 7px;
+    color: var(--vscode-button-foreground);
+    background: var(--vscode-button-background);
+    border: 1px solid transparent;
+    cursor: pointer;
+}
+.batch-actions button:hover:not(:disabled) {
+    background: var(--vscode-button-hoverBackground);
+}
+.batch-actions button:disabled {
+    cursor: default;
+    opacity: 0.55;
+}
+.batch-status {
+    min-height: 1.3em;
+    margin-top: 5px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 11px;
+}
+.batch-checkbox {
+    flex: 0 0 auto;
+    margin: 0 5px 0 2px;
+}
 ul {
     list-style: none;
     padding-left: 20px;

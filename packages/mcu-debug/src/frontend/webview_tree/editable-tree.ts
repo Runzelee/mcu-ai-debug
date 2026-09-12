@@ -19,14 +19,23 @@ export interface TreeViewProviderDelegate {
     onEditValue(item: TreeItem, newValue: string): Promise<void>;
     onDelete?(item: TreeItem): Promise<void>;
     onAdd?(value: string): Promise<void>;
+    onAddMany?(value: string): Promise<BatchOperationResult>;
+    onDeleteMany?(items: TreeItem[]): Promise<BatchOperationResult>;
     onMoveUp?(item: TreeItem): Promise<void>;
     onMoveDown?(item: TreeItem): Promise<void>;
     onSetFormat?(item: TreeItem, format: string): Promise<void>;
     onSetExpanded?(item: TreeItem, expanded: boolean): Promise<void>;
 }
 
+export interface BatchOperationResult {
+    changed: number;
+    skipped: number;
+    message: string;
+}
+
 export class EditableTreeViewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
+    private batchMode = false;
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -42,6 +51,11 @@ export class EditableTreeViewProvider implements vscode.WebviewViewProvider {
             await this._delegate.onAdd(value);
             this.refresh();
         }
+    }
+
+    public toggleBatchMode() {
+        this.batchMode = !this.batchMode;
+        this._view?.webview.postMessage({ type: "setBatchMode", enabled: this.batchMode });
     }
 
     public resolveWebviewView(webviewView: vscode.WebviewView, context: vscode.WebviewViewResolveContext, _token: vscode.CancellationToken) {
@@ -92,11 +106,37 @@ export class EditableTreeViewProvider implements vscode.WebviewViewProvider {
                 case "addRequested":
                     await this.add();
                     break;
+                case "addMany":
+                    if (this._delegate.onAddMany) {
+                        const result = await this._delegate.onAddMany(data.value);
+                        this._view?.webview.postMessage({ type: "batchResult", operation: "add", result });
+                        this.refresh();
+                    }
+                    break;
                 case "delete":
                     if (this._delegate.onDelete) {
                         await this._delegate.onDelete(data.item);
                         this.refresh();
                     }
+                    break;
+                case "deleteMany":
+                    if (this._delegate.onDeleteMany && Array.isArray(data.items) && data.items.length > 0) {
+                        const confirmation = await vscode.window.showWarningMessage(
+                            `Remove ${data.items.length} selected Live Watch expression${data.items.length === 1 ? "" : "s"}?`,
+                            { modal: true },
+                            "Remove",
+                        );
+                        if (confirmation === "Remove") {
+                            const result = await this._delegate.onDeleteMany(data.items);
+                            this._view?.webview.postMessage({ type: "batchResult", operation: "delete", result });
+                            this.refresh();
+                        } else {
+                            this._view?.webview.postMessage({ type: "batchCancelled" });
+                        }
+                    }
+                    break;
+                case "batchModeChanged":
+                    this.batchMode = Boolean(data.enabled);
                     break;
                 case "moveUp":
                     if (this._delegate.onMoveUp) {
@@ -152,6 +192,18 @@ export class EditableTreeViewProvider implements vscode.WebviewViewProvider {
             <link href="${codiconsUri}" rel="stylesheet" />
         </head>
         <body>
+            <section id="batch-toolbar" class="batch-toolbar" hidden>
+                <label for="batch-input">Paste expressions (one per line), then choose which to add</label>
+                <textarea id="batch-input" rows="4" placeholder="motor.speed&#10;sensors[index].value"></textarea>
+                <div id="batch-add-list" class="batch-add-list" aria-label="Expressions to add"></div>
+                <div class="batch-actions">
+                    <button id="batch-add" type="button" disabled>Add selected</button>
+                    <button id="batch-select-all" type="button">Select all watches</button>
+                    <button id="batch-delete" type="button" disabled>Remove selected</button>
+                    <button id="batch-done" type="button">Done</button>
+                </div>
+                <div id="batch-status" class="batch-status" role="status" aria-live="polite"></div>
+            </section>
             <div id="tree-root"></div>
             <script src="${scriptUri}"></script>
         </body>

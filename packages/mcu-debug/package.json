@@ -482,6 +482,12 @@
       },
       {
         "category": "MCU-AI-Debug",
+        "command": "mcu-ai-debug.liveWatch.toggleBatchEdit",
+        "title": "Toggle Live Watch Batch Edit",
+        "icon": "$(checklist)"
+      },
+      {
+        "category": "MCU-AI-Debug",
         "command": "mcu-ai-debug.liveWatch.saveSnapshot",
         "title": "Save Snapshot",
         "icon": "$(save)"
@@ -3588,6 +3594,11 @@
         }
       ],
       "view/title": [
+        {
+          "command": "mcu-ai-debug.liveWatch.toggleBatchEdit",
+          "when": "view == mcu-debug.liveWatch",
+          "group": "navigation"
+        },
         {
           "command": "mcu-debug.liveWatch.addExpr",
           "when": "view == mcu-debug.liveWatch",

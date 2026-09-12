@@ -101,6 +101,7 @@ export class MCUDebugExtension {
             vscode.commands.registerCommand("mcu-debug.liveWatch.addToLiveWatch", this.addToLiveWatch.bind(this)),
             vscode.commands.registerCommand("mcu-debug.liveWatch.moveUp", this.moveUpLiveWatchExpr.bind(this)),
             vscode.commands.registerCommand("mcu-debug.liveWatch.moveDown", this.moveDownLiveWatchExpr.bind(this)),
+            vscode.commands.registerCommand("mcu-ai-debug.liveWatch.toggleBatchEdit", this.toggleLiveWatchBatchEdit.bind(this)),
 
             vscode.commands.registerCommand("mcu-ai-debug.liveWatch.addSelectionToLiveWatch", this.addSelectionToLiveWatch.bind(this)),
             vscode.commands.registerCommand("mcu-ai-debug.liveWatch.saveSnapshot", this.saveLiveWatchSnapshot.bind(this)),
@@ -816,6 +817,10 @@ export class MCUDebugExtension {
 
     private addLiveWatchExpr() {
         this.liveWatchWebview.add();
+    }
+
+    private toggleLiveWatchBatchEdit() {
+        this.liveWatchWebview.toggleBatchMode();
     }
 
     private addToLiveWatch(arg: any) {

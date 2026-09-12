@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { TreeItem, TreeItemCollapsibleState, DebugSession, ProviderResult, Event, EventEmitter, Disposable } from "vscode";
-import { TreeViewProviderDelegate, TreeItem as WebviewTreeItem } from "../webview_tree/editable-tree";
+import { BatchOperationResult, TreeViewProviderDelegate, TreeItem as WebviewTreeItem } from "../webview_tree/editable-tree";
 import {
     LiveUpdateEvent,
     RegisterClientRequest,
@@ -17,6 +17,7 @@ import {
 import { VarUpdateRecord } from "../../adapter/gdb-mi/mi-types";
 import { LiveWatchLogger } from "./live-watch-logger";
 import { LiveWatchGrapher } from "./live-watch-grapher";
+import { parseBatchExpressions } from "./live-watch-batch";
 
 // Configuration interfaces
 interface LiveWatchConfig {
@@ -832,6 +833,61 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
             // We can use the existing helper
             this.addWatchExpr(value);
         }
+    }
+
+    async onAddMany(value: string): Promise<BatchOperationResult> {
+        const expressions = parseBatchExpressions(value);
+        let changed = 0;
+        let skipped = 0;
+
+        for (const expression of expressions) {
+            if (this.rootNode.findName(expression)) {
+                skipped++;
+            } else if (this.rootNode.addNewExpr(expression)) {
+                changed++;
+            } else {
+                skipped++;
+            }
+        }
+
+        if (changed > 0) {
+            this.saveState();
+            this.refresh();
+        }
+
+        return {
+            changed,
+            skipped,
+            message:
+                changed > 0
+                    ? `Added ${changed} expression${changed === 1 ? "" : "s"}${skipped > 0 ? `; skipped ${skipped} duplicate${skipped === 1 ? "" : "s"}` : ""}.`
+                    : expressions.length === 0
+                      ? "Enter one expression per line."
+                      : "All expressions are already in Live Watch.",
+        };
+    }
+
+    async onDeleteMany(items: WebviewTreeItem[]): Promise<BatchOperationResult> {
+        const ids = new Set(items.map((item) => item.id));
+        const nodes = this.rootNode.getChildren().filter((node) => ids.has(node.id) && !node.isDummyNode());
+        let changed = 0;
+
+        for (const node of nodes) {
+            if (this.rootNode.removeChild(node)) {
+                changed++;
+            }
+        }
+
+        if (changed > 0) {
+            this.saveState();
+            this.fire();
+        }
+
+        return {
+            changed,
+            skipped: items.length - changed,
+            message: `Removed ${changed} expression${changed === 1 ? "" : "s"}.`,
+        };
     }
 
     private findNodeById(node: LiveVariableNode, id: string): LiveVariableNode | undefined {

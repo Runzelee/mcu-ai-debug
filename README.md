@@ -66,6 +66,7 @@ Make debugging workflows faster by adding expressions directly from the editor, 
 ### Quick Add from Editor
 
 - While debugging with MCU-Debug, select a C/C++ expression in the editor, right-click and choose "Add to Live Watch" to push the expression into the Live Watch panel instantly. The same action is available from the Command Palette via the `Add to Live Watch` command (command id: `mcu-ai-debug.liveWatch.addSelectionToLiveWatch`).
+- Use the checklist action in the Live Watch title bar to enter batch-edit mode. Paste one expression per line, tick the expressions to add, or tick existing top-level watches and remove them together.
 
 ![right_click](./packages/mcu-debug/images/right-click.png)
 

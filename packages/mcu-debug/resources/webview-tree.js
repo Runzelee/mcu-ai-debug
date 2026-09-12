@@ -1,5 +1,9 @@
 const vscode = acquireVsCodeApi();
 const itemMap = new Map();
+const selectedIds = new Set();
+const selectedPendingExpressions = new Set();
+let pendingExpressions = new Set();
+let batchMode = false;
 
 window.addEventListener("message", (event) => {
     const message = event.data;
@@ -15,6 +19,24 @@ window.addEventListener("message", (event) => {
             break;
         case "refresh":
             requestChildren();
+            break;
+        case "setBatchMode":
+            setBatchMode(message.enabled);
+            break;
+        case "batchResult":
+            if (message.operation === "add" && message.result.changed > 0) {
+                document.getElementById("batch-input").value = "";
+                renderPendingExpressions();
+            }
+            if (message.operation === "delete") {
+                selectedIds.clear();
+                updateBatchDeleteButton();
+            }
+            showBatchStatus(message.result.message);
+            requestChildren();
+            break;
+        case "batchCancelled":
+            showBatchStatus("Removal cancelled.");
             break;
     }
 });
@@ -95,11 +117,16 @@ function generateItemContentHtml(item, isTopLevel) {
     }
 
     const chevronClass = item.expanded ? "codicon-chevron-down" : "codicon-chevron-right";
+    const checkboxHtml =
+        batchMode && isTopLevel && item.id !== "dummy-msg"
+            ? `<input class="batch-checkbox" type="checkbox" ${selectedIds.has(item.id) ? "checked" : ""} onclick="toggleBatchSelection(event, '${item.id}')" aria-label="Select expression">`
+            : "";
     const labelEscaped = (item.contextValue || "").replace(/"/g, "&quot;");
     const valueEscaped = (item.value || "").replace(/"/g, "&quot;");
     const editLabelWithTitle = editLabelText.replace(/(<span class="label"[^>]*>)/, `$1<span title="${labelEscaped}">`);
     const editValueWithTitle = editValueText.replace(/(<span class="value[^"]*"[^>]*>)/, `$1<span title="${valueEscaped}">`);
     return `
+        ${checkboxHtml}
         <span class="codicon ${chevronClass} ${item.hasChildren ? "" : "hidden"}" onclick="toggleExpand(event, '${item.id}')"></span>
         ${editLabelWithTitle}</span>
         ${editValueWithTitle}</span>
@@ -195,9 +222,145 @@ function renderChildren(parent, children) {
     });
 
     existingLiMap.forEach((li, id) => {
-        if (!keepIds.has(id)) li.remove();
+        if (!keepIds.has(id)) {
+            li.remove();
+            itemMap.delete(id);
+            selectedIds.delete(id);
+        }
     });
+    updateBatchDeleteButton();
 }
+
+function setBatchMode(enabled) {
+    batchMode = Boolean(enabled);
+    const toolbar = document.getElementById("batch-toolbar");
+    toolbar.hidden = !batchMode;
+    if (!batchMode) {
+        selectedIds.clear();
+        showBatchStatus("");
+    }
+    updateBatchDeleteButton();
+    requestChildren();
+    if (batchMode) {
+        document.getElementById("batch-input").focus();
+    }
+}
+
+function showBatchStatus(message) {
+    document.getElementById("batch-status").textContent = message || "";
+}
+
+function getPendingExpressions() {
+    const expressions = [];
+    const seen = new Set();
+    for (const line of document.getElementById("batch-input").value.split(/\r?\n/)) {
+        const expression = line.trim();
+        if (expression && !seen.has(expression)) {
+            seen.add(expression);
+            expressions.push(expression);
+        }
+    }
+    return expressions;
+}
+
+function renderPendingExpressions() {
+    const expressions = getPendingExpressions();
+    const nextExpressions = new Set(expressions);
+    for (const expression of selectedPendingExpressions) {
+        if (!nextExpressions.has(expression)) {
+            selectedPendingExpressions.delete(expression);
+        }
+    }
+    for (const expression of expressions) {
+        if (!pendingExpressions.has(expression)) {
+            selectedPendingExpressions.add(expression);
+        }
+    }
+    pendingExpressions = nextExpressions;
+
+    const container = document.getElementById("batch-add-list");
+    container.replaceChildren();
+    for (const expression of expressions) {
+        const label = document.createElement("label");
+        label.className = "batch-add-item";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = selectedPendingExpressions.has(expression);
+        checkbox.addEventListener("change", () => {
+            if (checkbox.checked) {
+                selectedPendingExpressions.add(expression);
+            } else {
+                selectedPendingExpressions.delete(expression);
+            }
+            updateBatchAddButton();
+        });
+        const text = document.createElement("span");
+        text.textContent = expression;
+        label.append(checkbox, text);
+        container.appendChild(label);
+    }
+    updateBatchAddButton();
+}
+
+function updateBatchAddButton() {
+    const button = document.getElementById("batch-add");
+    const count = selectedPendingExpressions.size;
+    button.disabled = count === 0;
+    button.textContent = count > 0 ? `Add selected (${count})` : "Add selected";
+}
+
+function updateBatchDeleteButton() {
+    const button = document.getElementById("batch-delete");
+    button.disabled = selectedIds.size === 0;
+    button.textContent = selectedIds.size > 0 ? `Remove selected (${selectedIds.size})` : "Remove selected";
+}
+
+window.toggleBatchSelection = (event, id) => {
+    event.stopPropagation();
+    if (event.target.checked) {
+        selectedIds.add(id);
+    } else {
+        selectedIds.delete(id);
+    }
+    updateBatchDeleteButton();
+};
+
+document.getElementById("batch-add").addEventListener("click", () => {
+    const expressions = getPendingExpressions().filter((expression) => selectedPendingExpressions.has(expression));
+    if (expressions.length > 0) {
+        vscode.postMessage({ type: "addMany", value: expressions.join("\n") });
+    }
+});
+
+document.getElementById("batch-input").addEventListener("input", renderPendingExpressions);
+
+document.getElementById("batch-select-all").addEventListener("click", () => {
+    const checkboxes = Array.from(document.querySelectorAll("#tree-root > ul > li > .tree-content > .batch-checkbox"));
+    const selectAll = checkboxes.some((checkbox) => !checkbox.checked);
+    for (const checkbox of checkboxes) {
+        checkbox.checked = selectAll;
+        const li = checkbox.closest("li[data-id]");
+        if (!li) continue;
+        if (selectAll) {
+            selectedIds.add(li.dataset.id);
+        } else {
+            selectedIds.delete(li.dataset.id);
+        }
+    }
+    updateBatchDeleteButton();
+});
+
+document.getElementById("batch-delete").addEventListener("click", () => {
+    const items = Array.from(selectedIds, (id) => ({ id }));
+    if (items.length > 0) {
+        vscode.postMessage({ type: "deleteMany", items });
+    }
+});
+
+document.getElementById("batch-done").addEventListener("click", () => {
+    setBatchMode(false);
+    vscode.postMessage({ type: "batchModeChanged", enabled: false });
+});
 
 window.startEdit = (element, id, field) => {
     let currentVal = element.innerText;

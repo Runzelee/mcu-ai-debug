@@ -29,6 +29,8 @@ Make debugging workflows faster by adding expressions directly from the editor, 
 ### Quick Add from Editor
 Select a C/C++ expression in the editor, right-click and choose **"Add to Live Watch"** to push the expression into the Live Watch panel instantly.
 
+Use the checklist action in the Live Watch title bar for batch editing. Paste one expression per line and tick the expressions to add; existing top-level watches also get checkboxes for bulk removal.
+
 ![right_click](https://raw.githubusercontent.com/Runzelee/mcu-ai-debug/main/packages/mcu-debug/images/right-click.png)
 
 ### Live Watch Snapshot (JSON)
