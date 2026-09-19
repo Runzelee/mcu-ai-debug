@@ -1,9 +1,10 @@
 # GDB RSP Multiplexer in the Probe Agent — Design & Plan
 
-**Status:** Design agreed; **Phase 1 complete** — 77 tests across `frame`, `caps`, `packet` and
-`state`, all pure with no I/O. Code lives in `packages/mdbg/src/gdb_rsp/`; the orphan stub at
-`proxy_helper/proxy_server/gdb_rsp.rs` is gone. Phase 2 (the multiplexer) is next.
-Revised 2026-09-19.
+**Status:** Design agreed. **Phase 1 complete; Phase 2 complete except the threaded shell** — the
+multiplexer core (`mux.rs`) and the chunking layer (`chunk.rs`) are written and tested sans-IO:
+routing, ack accounting, the send gate, the forbidden-packet choke point, request splitting and
+short-reply reassembly. 136 tests in `packages/mdbg/src/gdb_rsp/`. Still to do: the threaded shell
+that owns the socket, then Phase 3. Revised 2026-09-19.
 
 **Goal:** make the Probe Agent (`mdbg proxy`) a **multiplexer on the GDB Remote Serial Protocol
 connection to the gdb-server**. GDB becomes one client on that connection; the Agent's own
@@ -263,12 +264,53 @@ struct Pending {
 }
 ```
 
-The mux holds one `VecDeque<Pending>` in send order. Every frame the reader thread decodes either
-retires the head (a reply), or does not (an ack, an `O`, an `F`, a `%` notification, a `\x03`).
-Retiring the head yields the `source`, which says where the bytes go:
+The mux holds one `VecDeque<Pending>` in send order. Resolving an entry yields its `source`, which
+says where the bytes go:
 
-- `Gdb(stream_id)` → forward the **raw** reply bytes as a funnel frame on that stream.
+- `Gdb` → forward the **raw** reply bytes as a funnel frame on that stream.
 - `Agent(id)` → decode and complete that consumer's one-shot.
+
+#### Replies do not arrive in send order, so the head is the wrong answer
+
+An earlier draft of this section said a reply "retires the head". **That is wrong, and it is wrong
+in exactly the case the whole design exists for.** While GDB has an open-ended `c` outstanding we
+send an `m` behind it; the `m` reply comes back first, because the `c` is answered only when the
+target halts, perhaps minutes later. Retiring the head would hand our memory data to GDB as its
+stop reply, and hand the real stop reply to a consumer expecting bytes.
+
+The rule that works: **a reply resolves the earliest pending request that could have produced it.**
+Each entry records what its reply set contains:
+
+| Request                       | Stop reply?         | Anything else? | Open-ended? |
+| ----------------------------- | ------------------- | -------------- | ----------- |
+| `c`, `C`, `s`, `S`, `vCont;c` | yes                 | no             | **yes**     |
+| `?`                           | yes                 | no             | no          |
+| `vAttach`, `vRun`             | yes                 | yes            | no          |
+| `m`, `M`, `x`, `X`, `q…`      | no                  | yes            | no          |
+| `R`, `k`                      | — no reply at all — |                |
+
+A two-way "is it a resume" split is **not** enough, and the unit tests caught that: `?` is not a
+resume yet is answered by a stop reply, and `vAttach` may be answered either way. The two classes
+stay distinguishable because a stop reply's tag is uppercase (`S`/`T`/`W`/`X`) while hex memory data
+is lowercase, so no `m` reply can be read as one.
+
+`R` and `k` draw no reply, so they get **no pending entry** (beyond ack accounting). Tracking them
+would hold a slot for ever and — worse — let them match a reply belonging to one of _our_ requests,
+routing target memory to GDB.
+
+**Open-ended requests are exempt from the pipelining budget.** Otherwise a single `c` at depth 1
+would block the Agent for the entire run, which is precisely the interval we exist to work in. A
+_prompt_ request of GDB's does count: at depth 1, one of our reads waits behind GDB's `m`.
+
+Two further rules, both of which started as bugs the tests found:
+
+- **Observe run state before matching, and whether or not anything matches.** A stop reply is a
+  fact about the target regardless of which request drew it, and some are unsolicited — the target
+  can halt on its own, or in response to a `\x03`, which is not a packet and so has no entry to
+  match. Skipping the update for unmatched replies left the state at `Unknown` and the send gate
+  shut for the whole session.
+- **An ack we cannot attribute goes to GDB.** We swallow only acks positively matched to our own
+  packets; dropping one GDB was owed stalls it permanently.
 
 ### 4.2 Pipelining
 
@@ -455,6 +497,117 @@ windows, and an ownership policy for `Z`/`z` — which is per-core state that tw
 believe they own. That last one is the hard part and is not a small design. Out of scope here;
 recorded in §12 q4, and the Phase-2 FIFO should be written so as not to preclude it.
 
+### 4.7.1 Chunking belongs in the Agent, not in the clients
+
+**Decision.** A logical memory access is split into packets, and the replies reassembled, on the
+**Agent side** — `chunk.rs`, layered on top of `MuxCore`. Consumers ask for an address and a length
+and get bytes; they never see `PacketSize`, the `x`-versus-`m` choice, or a short reply.
+
+Two reasons this is the right side of the line:
+
+1. **Only the Agent knows the answer.** `PacketSize` comes out of the `qSupported` exchange, which
+   only the mux observes. The TypeScript side has never had a way to find out, and so chunks every
+   memory request at a blind **512 bytes** regardless of the server — a number inherited from
+   OpenOCD's old limit, which has been 16384 for years. Splitting Agent-side deletes that guess
+   rather than relocating it.
+2. **It protects the session from one careless client.** A consumer asking for a megabyte gets a
+   megabyte in as many packets as it takes, not a broken connection.
+
+**`MuxCore` stays out of it.** It holds no state for splitting requests or coalescing replies and
+routes single packets only — the simplicity is deliberate, because the routing rules in §4.1 are
+subtle enough on their own. `chunk.rs` is the layer above, and is itself pure: it plans packets and
+accepts replies, with no I/O and no knowledge of how they travel.
+
+**TypeScript still gets told the number.** Phase 3 item 13 adds `packet_size` to `PortReserved`
+(already on the wire for every `gdbPort` stream), so a client that wants to size its own requests
+can, and the 512 can be retired even on paths that do not go through `chunk.rs`.
+
+### 4.7.2 GDB is the mux's first client, so the mux gets its own TCP port
+
+**GDB is the mux's number-one client** — by packet volume, and as the only one whose latency a human
+feels. The Agent's internal consumers poll in the background; GDB is what someone is sitting in front
+of pressing Step. So the transport question is settled by GDB's needs, and the consumers' needs are a
+footnote to it rather than the other way round.
+
+**GDB is a TCP client, in every topology.** It connects to a port and speaks RSP. That never varies.
+What varies is only _who binds that port_:
+
+| Topology  | Who binds the port GDB connects to           | Path from GDB to the gdb-server         |
+| --------- | -------------------------------------------- | --------------------------------------- |
+| **Local** | the **Agent**, in front of the mux           | GDB → mux → gdb-server, all in Rust     |
+| Remote    | the TS proxy-client, on the Engineer Machine | GDB → funnel → Agent → mux → gdb-server |
+
+So the mux's client side is **primarily a TCP listener**, and the funnel is the variant forced on us
+when the probe is on another machine — not the other way about. There is genuinely no choice remotely:
+GDB cannot reach a loopback port on the Probe Host, which is why the funnel exists at all.
+
+#### `TcpPortDef` already models this, so the churn is small
+
+`TcpPortDef { name, localPort, remotePort }` (`adapter/servers/common.ts`) already carries exactly the
+split this needs, and the codebase already honours it:
+
+- **`localPort`** — where GDB connects. `connectCommands()` builds
+  `target extended-remote 127.0.0.1:<localPort>`.
+- **`remotePort`** — the gdb-server's own port. `serverArguments()` passes it as `gdb_port <remotePort>`.
+
+Today the TS proxy-client binds `localPort` (`proxy-client.ts`, `.listen(portDef.localPort, "127.0.0.1")`)
+and funnels to `remotePort`. **The local-with-mux case is the same shape with both ends on one
+machine**: the only change is that the _Agent_ binds `localPort` and the mux sits directly behind it.
+GDB's contract does not change, `connectCommands()` does not change, and no new concept enters the TS
+data model. The Agent simply has to report the port it bound — which is one more field on
+`PortReserved`, alongside the `packet_size` already planned for Phase 3 item 13.
+
+That also disposes of a worry worth stating so nobody re-raises it: this is **not** two extra ports per
+core. It is the same two ports the proxy path already allocates, both bound on the Probe Host in the
+local case.
+
+#### Why not just funnel locally too
+
+| Path                               | TCP hops | Node.js in the RSP hot path?                       |
+| ---------------------------------- | -------- | -------------------------------------------------- |
+| Today, local, no proxy             | 1        | no                                                 |
+| Local via the funnel               | 3        | **yes** — every packet through the TS proxy-client |
+| Local via a mux-owned TCP listener | 2        | no                                                 |
+
+The hop count is the lesser argument. The real one is that funnelling locally puts the Node event loop
+between GDB and the gdb-server for _every RSP packet_ — jitter on interactive latency, not a fixed
+cost, and the kind of thing users experience as "the debugger feels sluggish" without ever filing a
+useful bug. A mux-owned listener keeps the whole RSP path in Rust, costs one extra loopback hop over
+today, and keeps the mux in the byte path so Agent-side RTT works locally, which is what §8 needs.
+
+**The core does not care.** `on_gdb_bytes` and `Action::ToGdb` are a byte sink and source; `MuxCore`
+cannot tell a funnel frame from a TCP accept. Being sans-IO makes this a deployment choice rather than
+a rewrite, and lets Phase 4 item 21 settle it by measurement.
+
+#### The Agent's own consumers need no transport at all
+
+RTT, the profiler and the trace drain are **in-process** with the mux once they are in Rust — a channel
+call on the Probe Host, next to the probe. That is the entire point of moving them; handing their
+results back out over TCP or a funnel stream would reintroduce the hop this design exists to delete.
+`ConsumerId` routes a reply to the right consumer; it is not ownership.
+
+The serial `attach_client`/`detach_client` protocol is deliberately **not** copied, for a real
+difference rather than taste. A serial port is a **shared resource that outlives every session**:
+`OpenPort` carries `direct_refs` and a per-session funnel map precisely so the device survives one
+session ending while another still holds it, and so an admin force-close can take it away. The RSP mux
+has none of those properties — per session, per core, created when the gdb stream connects and
+destroyed with the session (the _parent_ session for chained configurations; §12 q8). Nothing to
+refcount, nothing to keep alive, no second owner.
+
+There is also **no TypeScript-side RSP consumer today**: the memory view and live watch both go through
+GDB. If one ever appears, the right shape is a typed control-channel request — "read me these bytes" is
+an RPC with `seq` correlation, not a byte pipe — and not a new funnel stream.
+
+**RTT data flowing _out_ to the UI is a different question with a different answer**: that _is_ a byte
+stream to the extension, so it is a funnel stream, exactly like serial's funnel transport. Keeping it
+distinct from RSP _access_ is what stops the consumer side being over-built.
+
+#### The load profile is reassuring
+
+RTT and profiling run while the target is _running_; GDB's heavy traffic — stack walks, variable reads —
+happens while it is _halted_. The two loads barely contend for the link. What needs protecting is GDB's
+interactive latency, which is paid per packet per hop, which is the table above.
+
 ### 4.8 How mux clients must behave
 
 The mux enforces what it can (§4.5), but most of the discipline has to live in the clients — RTT,
@@ -579,6 +732,72 @@ The `/ 2` is there because `m` returns two hex characters per byte, and GDB appl
 well rather than tracking two limits. Mirroring that is both correct for `m` and safely
 conservative for `x`, and it is one less thing to get wrong per server.
 
+### `PacketSize` excludes the framing — so no allowance for it is needed
+
+Worth settling explicitly, because the arithmetic changes if it is wrong. The manual's `qSupported`
+entry says:
+
+> `PacketSize=bytes` — The remote stub can accept packets up to at least _bytes_ in length. GDB
+> will send packets up to this size for bulk transfers, and will never send larger packets. This is
+> a limit on the data characters in the packet, **not including the frame and checksum.**
+
+So `$`, `#` and the two checksum digits sit _outside_ the budget. `PacketSize` is a **payload**
+limit, not a wire limit. That is also why GDB's plain `PacketSize / 2` for a hex read is exact
+rather than approximate: `2N ≤ PacketSize` is the whole constraint, with nothing left to subtract.
+
+**It is also hexadecimal**, with no `0x`. `PacketSize=4000` is 16384, not four thousand — a unit
+test of ours got this wrong before the assertion caught it.
+
+### Short replies are legal, which makes the arithmetic an optimisation
+
+The manual says of both `m` and `x`: _"The reply may contain fewer addressable memory units than
+requested."_ GDB's own comment agrees — _"Return what we have. Let higher layers handle partial
+reads."_
+
+So a reader has to loop and resume regardless of how carefully it chunked. That is what makes exact
+sizing a performance matter rather than a correctness one, and it is why **a stub that is wrong
+about its own advertised size cannot break us** — as OpenOCD's was for years, advertising 512 while
+its buffer held 511 (fixed upstream by allocating 512+1). We compute a sane chunk, accept whatever
+comes back, and ask again from where it stopped.
+
+### Neither `m` nor `x` is safe for memory-mapped I/O
+
+The most consequential thing in this section, and it lands on two planned consumers. The manual
+gives both packets the identical warning:
+
+> The stub need not use any particular size or alignment when gathering data from memory for the
+> response; even if _addr_ is word-aligned and _length_ is a multiple of the word size, the stub is
+> free to use byte accesses, or not. **For this reason, this packet may not be suitable for
+> accessing memory-mapped I/O devices.**
+
+`DWT_PCSR` and the CoreSight trace registers are MMIO. A 32-bit sampling register fetched as four
+byte accesses returns nonsense, and `PCSR` in particular has read side effects. **RTT is
+unaffected** — it reads ordinary SRAM, where access width does not matter.
+
+In practice OpenOCD's `target_read_buffer` does use word accesses for aligned, word-sized requests
+on Cortex-M, so this is likely to work; but "likely" is not a guarantee the protocol offers, and a
+different server may differ. Consequences:
+
+- It is a **per-server matrix item** (§7), not an assumption.
+- If a server does not oblige, the guaranteed route for MMIO is a **monitor command** (`qRcmd`,
+  e.g. OpenOCD's `mdw`) — server-specific, which is why §4.5 permits `qRcmd` at all.
+- It sharpens the ordering in §11: RTT (Phase 4 item 20) rests on nothing uncertain here; PC
+  sampling (item 22) and trace (item 23) do.
+
+### Using `x` is gated on `binary-upload`, not on trying it
+
+> GDB will only use this packet if the stub reports the `binary-upload` feature is supported in its
+> `qSupported` reply.
+
+So `x` is never a guess. Note that `binary-upload` is a **stub-only** feature — the server
+volunteers it and GDB never asks for it, which a captured `qSupported` request confirms. The empty
+reply that `remote_read_bytes_1` handles is a belt-and-braces fallback, not the primary signal, and
+we treat it the same way: feature bit decides, empty reply degrades gracefully to `m`.
+
+Whether a stub advertising `binary-upload` also implements `m` is not stated anywhere, and no such
+stub is known. The fallback is one-directional in practice, and the empty-reply path covers it
+either way.
+
 ---
 
 ## 6. Module layout
@@ -653,6 +872,31 @@ and surfaced to the user once per session when it is not `Full`:
 under this design does not matter at all, since we do not open one — while possibly allowing
 requests while running. If so, the mux makes probe-rs work where a second-connection design could
 not. That is a point in favour of the choice made in §2, and it is a matrix item, not a claim.
+
+### Prerequisite: the gdb-server must expose a TCP port — Black Magic Probe does not
+
+The mux sits between two endpoints and speaks RSP to both. That presumes the gdb-server side _is_ an
+endpoint it can connect to, which for every server in the matrix means a TCP port. **Black Magic
+Probe does not meet that requirement**, and it is worth writing down rather than discovering later.
+
+BMP has no gdb-server process at all: the probe firmware is itself the RSP stub, reached over a
+CDC-ACM serial link. `BMPServerController` reflects this exactly —
+`portsNeeded: string[] = []`, and `connectCommands()` is
+`target-select extended-remote ${BMPGDBSerialPort}`, a device path rather than a host and port. So
+there is no TCP endpoint for the mux to interpose on, and the proxy's port-allocation machinery never
+applies to it either.
+
+**Decision: BMP is out of scope for remoting, and for Agent-side features with it.** It stays fully
+supported for local, direct debugging — nothing here takes that away. Documented as a requirement
+BMP does not meet.
+
+**For the record, this is a hardware-availability decision, not an architectural one.** `MuxCore` is
+sans-IO on _both_ sides — its server side is a byte sink and source just as its GDB side is — and
+`mdbg` already contains a complete serial stack (`serial/port.rs`, reader thread, ring buffer). A BMP
+bridge would therefore be: the Agent opens the CDC-ACM device, presents a TCP listener to GDB, and
+runs the mux in between. That is a small piece of work, and it is the _only_ route by which BMP could
+ever be remoted, so the architecture is the enabler rather than the obstacle. It is unstaffed because
+nobody has donated a probe to test against, not because it does not fit.
 
 ### The matrix to fill in
 
@@ -809,22 +1053,36 @@ Phases 1–3 do not depend on the §8 decision. Each item is sized to be a revie
 
 ### Phase 2 — The mux
 
-- [ ] **8.** `RspMux` skeleton: owns the socket, reader + writer threads, send queue, pending FIFO.
-      `feed_from_gdb` enqueues and returns without blocking. Pure pass-through at this point — no
-      Agent packets yet — so the verbatim-forwarding test (item 12) can be written against it
-      first.
-- [ ] **9.** Ack accounting (§4.3), including the switch point and `-` retransmit with a fatal
-      threshold.
-- [ ] **10.** The send gate (§4.2) and the forbidden-packet choke point (§4.5), with the tests that
-      assert both. `depth` defaults to 1 and is refused above 1 outside no-ack mode (§4.2.1).
-- [ ] **11.** Consumer API: `attach`/`detach` in the shape of `serial/port.rs`, `read_memory` /
-      `write_memory` with `packet_size` chunking and `x`-vs-`m` selection, per-request timeouts.
-- [ ] **12.** Verbatim-forwarding test over recorded transcripts; mux routing/gating unit tests.
+- [x] **8.** `MuxCore` in `mux.rs`: send queue, pending FIFO, routing, frame-boundary forwarding.
+      **Built sans-IO** — no socket, no threads, no clock it is not handed — so every §4 rule is
+      testable without a gdb-server or a sleep. The threaded shell that owns the socket is a
+      separate, thin layer with no protocol logic in it (still to write).
+- [x] **9.** Ack accounting (§4.3): the no-ack switch at the exact `OK` that answers
+      `QStartNoAckMode`, `-` retransmit with a 3-strike limit, our acks swallowed and GDB's
+      forwarded, and unattributable acks forwarded to GDB.
+- [x] **10.** The send gate (§4.2) and the forbidden-packet choke point (§4.5), with tests for
+      both. `depth` defaults to 1 and `set_depth` **refuses** above 1 outside no-ack mode (§4.2.1).
+      The choke point is a **whitelist**, so a newly-added builder is denied until explicitly
+      allowed.
+- [x] **11a.** Chunking and reassembly in `chunk.rs` (§4.7.1): `plan_read`/`plan_write` for a
+      caller that wants the whole schedule, `ReadAssembler`/`WriteAssembler` for one that goes step
+      by step. Handles **short replies** by resuming from where the stub stopped, refuses to spin on
+      a zero-length answer, and reports how far a failed write got. Pure — no I/O.
+- [ ] **11b.** The blocking `read_memory`/`write_memory` façade over `chunk.rs` + `MuxCore`, once
+      the threaded shell exists to drive it. **No attach/detach protocol** (§4.7.2): consumers are
+      in-process and session-scoped, so `ConsumerId` for reply routing is all that is needed.
+- [x] **12.** Verbatim-forwarding test — both directions fed **one byte at a time, interleaved**,
+      asserting the forwarded streams are byte-identical to the input with no consumers attached.
+      Plus routing, gating, ack and timeout unit tests.
 
 ### Phase 3 — Integration into `ProxyServer`
 
 - [ ] **13.** Retain `stream_id_str` on `PortInfoListner`/`PortInfo` (it is already on the wire in
-      `PortReserved`; the Agent throws it away today), and add `StreamKind { Control, Stdout,
+      `PortReserved`; the Agent throws it away today). **Also add to `PortReserved`**, for `GdbRsp`
+      streams: `packet_size` (§4.7.1), so the TypeScript side can retire its blind 512-byte chunking
+      on paths that do not go through `chunk.rs`; and the **mux listener port** the Agent bound for
+      GDB in the local topology (§4.7.2), which becomes that stream's `localPort`. Add
+      `StreamKind { Control, Stdout,
 Stderr, GdbRsp { core }, Swo, Tcl, Telnet, Console, Other }` classified once at allocation.
       The rule is `gdbPort` + optional digits — note `createPortName()`
       (`packages/mcu-debug/src/adapter/servers/common.ts:650`) suffixes only when `procNum != 0`,
@@ -858,8 +1116,10 @@ Stderr, GdbRsp { core }, Swo, Tcl, Telnet, Console, Other }` classified once at 
       thread, with the existing decoder pipeline unchanged. Keep the TS path behind a switch until
       parity is measured. Server-side RTT stays available and unchanged.
 - [ ] **21.** Measure. RTT throughput and latency, Agent vs. live-GDB, in both topologies, plus
-      GDB's own step/continue latency with a consumer active. The justification for this work is a
-      number; produce it.
+      GDB's own step/continue latency with a consumer active. Also settle §4.7.2 empirically:
+      **local via a mux-owned TCP listener vs. local via the funnel**, watching jitter as well as
+      mean latency, since the funnel path runs every RSP packet through the Node event loop. The
+      justification for this work is a number; produce it.
 - [ ] **22.** DWT PC sampling: poll `DWT_PCSR`, aggregate, stream results. Symbolication via
       `da_helper` is a separate design.
 - [ ] **23.** Stack probing and ETB/ETF drain — separate designs, same primitive. Stack probing has

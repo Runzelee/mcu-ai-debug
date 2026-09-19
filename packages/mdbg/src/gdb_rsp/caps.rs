@@ -22,6 +22,13 @@
 /// GDB's baseline when a stub advertises no `PacketSize`: `remote_packet_size =
 /// 400 - 1` in `gdb/remote.c`. Deliberately small; almost every real stub
 /// advertises something larger.
+///
+/// Historical note on why we stay conservative rather than exact: OpenOCD's limit
+/// was 512 for years, and its buffer was actually one byte short of that — a
+/// stub can be wrong about its own advertised size. Combined with the protocol
+/// explicitly permitting short replies (see [`RspCaps::max_read_bytes`]), the
+/// right posture is to ask for a sane amount and loop, not to compute a
+/// byte-exact maximum and trust it.
 pub const DEFAULT_PACKET_SIZE: usize = 399;
 
 /// GDB's `MIN_MEMORY_PACKET_SIZE`. A stub advertising less than this gets
@@ -35,15 +42,34 @@ pub const MIN_PACKET_SIZE: usize = 20;
 const WRITE_HEADER_RESERVE: usize = 40;
 
 /// How this connection should read memory.
+///
+/// **Neither form guarantees the access size or alignment used on the target.**
+/// The GDB manual says of both `m` and `x`, in identical words: "The stub need not
+/// use any particular size or alignment when gathering data from memory for the
+/// response; even if addr is word-aligned and length is a multiple of the word
+/// size, the stub is free to use byte accesses, or not. For this reason, this
+/// packet may not be suitable for accessing memory-mapped I/O devices."
+///
+/// That warning lands squarely on two of our planned consumers: `DWT_PCSR` and the
+/// CoreSight trace registers are MMIO, and a 32-bit MMIO register read as four
+/// byte accesses returns nonsense. RTT is unaffected — it reads ordinary SRAM.
+/// See `docs-internal/gdb-rsp.md` §7: whether a given server actually issues
+/// aligned word accesses for aligned word-sized requests is a per-server fact to
+/// verify, and a monitor command may be the only guaranteed route for MMIO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemoryReadKind {
-    /// `m addr,len` — hex reply, two characters per byte. Mandatory for every
-    /// stub, so this is the default: assuming `x` and being wrong costs a
+    /// `m addr,len` — hex reply, two characters per byte. Universally implemented
+    /// in practice, so this is the default: assuming `x` and being wrong costs a
     /// failed read, assuming `m` and being wrong costs only bandwidth.
     #[default]
     Hex,
-    /// `x addr,len` — reply is `b` followed by escaped binary. Optional,
-    /// advertised as `binary-upload+`.
+    /// `x addr,len` — reply is `b` followed by escaped binary.
+    ///
+    /// **Only legal when the stub advertises `binary-upload+`.** The manual is
+    /// unambiguous: "GDB will only use this packet if the stub reports the
+    /// `binary-upload` feature is supported in its `qSupported` reply." So this is
+    /// never a guess — [`RspCaps::memory_read_kind`] derives it from the feature
+    /// bit and nothing else.
     Binary,
 }
 
@@ -103,6 +129,13 @@ impl ServerTier {
 pub struct RspCaps {
     /// `PacketSize=<hex>`, if advertised. Use [`RspCaps::packet_size`] rather
     /// than this: it applies the default and the floor.
+    ///
+    /// **It counts payload only.** The GDB manual's `qSupported` section is
+    /// explicit: "This is a limit on the data characters in the packet, **not**
+    /// including the frame and checksum." So `$`, `#` and the two checksum digits
+    /// are *outside* the budget, and no framing allowance needs subtracting — which
+    /// is also why GDB's plain `PacketSize / 2` for a hex read is exact rather
+    /// than approximate.
     advertised_packet_size: Option<usize>,
     /// `binary-upload+` — the `x` packet (and in practice `X`) is available.
     pub binary_upload: bool,
@@ -182,11 +215,19 @@ impl RspCaps {
 
     /// Largest number of target bytes to request in one read.
     ///
-    /// Halved, matching `remote_read_bytes_1`'s `(buf_size / unit_size) / 2`.
-    /// The halving exists because `m` answers in hex, two characters per byte;
-    /// GDB applies it to `x` as well rather than tracking two limits, and so do
-    /// we — correct for `m`, safely conservative for `x`, one less thing to get
+    /// Halved, matching `remote_read_bytes_1`'s `(buf_size / unit_size) / 2`. The
+    /// halving exists because `m` answers in hex, two characters per byte; since
+    /// `PacketSize` excludes framing, `2N <= PacketSize` is exact rather than
+    /// approximate. GDB applies the same halving to `x` rather than tracking two
+    /// limits, and so do we — safely conservative there, and one less thing to get
     /// wrong per server.
+    ///
+    /// **This is a chunk size, not a contract.** The protocol explicitly allows a
+    /// short answer: "The reply may contain fewer addressable memory units than
+    /// requested." So a reader must loop until it has what it asked for regardless,
+    /// which is what makes exact arithmetic an optimisation rather than a
+    /// correctness requirement — and is the reason a stub that lies about its own
+    /// size (as OpenOCD's 512-that-was-really-511 did for years) cannot break us.
     pub fn max_read_bytes(&self) -> usize {
         (self.packet_size() / 2).max(1)
     }
@@ -222,15 +263,23 @@ impl RspCaps {
 mod tests {
     use super::*;
 
-    /// OpenOCD's reply, transcribed from the `xml_printf` format string in
-    /// `src/server/gdb_server.c` (the `qSupported` handler) with both optional
-    /// features enabled. `PacketSize` is `GDB_BUFFER_SIZE` = 16384 = 0x4000.
+    /// OpenOCD's reply, **captured verbatim** from its own
+    /// `gdb_log_outgoing_packet()` debug output during a real session (PSoC 6 via
+    /// KitProg3). `PacketSize=4000` is `GDB_BUFFER_SIZE` = 16384.
     ///
     /// Note what is **absent**: no `binary-upload+`, because OpenOCD does not
     /// implement the `x` packet at all — there is no `case 'x'` in its dispatch.
     /// Memory reads against OpenOCD are hex, two characters per target byte.
     const OPENOCD: &str = "PacketSize=4000;qXfer:memory-map:read+;qXfer:features:read+;\
                            qXfer:threads:read+;QStartNoAckMode+;vContSupported+";
+
+    /// What GDB *asks* for, from the same capture. Kept as documentation of the
+    /// other half of the exchange: note that `binary-upload` does not appear here,
+    /// because it is a stub-only feature the server volunteers — GDB never
+    /// requests it.
+    const GDB_REQUEST: &str = "multiprocess+;swbreak+;hwbreak+;qRelocInsn+;fork-events+;\
+                               vfork-events+;exec-events+;vContSupported+;QThreadEvents+;\
+                               QThreadOptions+;no-resumed+;memory-tagging+";
 
     #[test]
     fn parses_openocds_reply() {
@@ -247,6 +296,18 @@ mod tests {
         // 16384 / 2 -- and for a hex-only server the halving is exactly right
         // rather than merely conservative.
         assert_eq!(caps.max_read_bytes(), 8192);
+    }
+
+    #[test]
+    fn gdbs_own_request_does_not_mention_binary_upload() {
+        // `binary-upload` is a stub-only feature: the server volunteers it, GDB
+        // never asks. Parsing GDB's request must therefore not conclude that `x`
+        // is available -- and must not crash on a list of features we ignore.
+        let caps = RspCaps::parse_reply(GDB_REQUEST);
+        assert!(!caps.binary_upload);
+        assert!(!caps.packet_size_was_advertised());
+        assert!(caps.multiprocess, "should still parse the tokens it does know");
+        assert!(caps.vcont_supported);
     }
 
     #[test]

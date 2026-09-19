@@ -112,12 +112,18 @@ impl StateTracker {
                 // Not a state change: the target runs until the server reports a halt.
                 self.interrupt_pending = true;
             }
-            (Direction::ToServer, FrameKind::Packet) => {
-                if is_resume(&frame.payload) {
+            (Direction::ToServer, FrameKind::Packet) => match classify_client(&frame.payload) {
+                ClientEffect::Resume => {
                     self.state = TargetState::Running;
                     self.interrupt_pending = false;
                 }
-            }
+                ClientEffect::Invalidate => {
+                    self.state = TargetState::Unknown;
+                    self.last_signal = None;
+                    self.interrupt_pending = false;
+                }
+                ClientEffect::None => {}
+            },
             (Direction::FromServer, FrameKind::Packet) => self.apply_stop_reply(&frame.payload),
             (Direction::FromServer, FrameKind::Notification) => {
                 // `%Stop:<stop reply>` in non-stop mode. We do not use non-stop,
@@ -160,7 +166,26 @@ impl StateTracker {
     }
 }
 
-/// Whether this **client-to-server** payload resumes execution.
+/// What a **client-to-server** packet does to our knowledge of the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientEffect {
+    /// Execution resumed. The reply, whenever it comes, will be a stop reply.
+    Resume,
+    /// The session changed such that what we knew is no longer true, but the new
+    /// truth is not implied by the packet either.
+    ///
+    /// `vAttach` is the case that matters: **attaching does not necessarily
+    /// halt.** GDB can attach with or without a halt — halting is its default,
+    /// but it is a choice, and mcu-debug deliberately does it both ways. So an
+    /// attach tells us only that we no longer know. If it did halt, the stop
+    /// reply that follows says so; if it did not, [`TargetState::Unknown`] is the
+    /// honest answer until something else settles it.
+    Invalidate,
+    /// Says nothing about execution.
+    None,
+}
+
+/// Classify a **client-to-server** payload.
 ///
 /// Matched on exact packet shapes rather than a first-byte test, because several
 /// resume letters are prefixes of packets that resume nothing.
@@ -179,31 +204,44 @@ impl StateTracker {
 ///    [`Direction`] check in [`StateTracker::observe`], not anything here.
 /// 3. `vCont;<action>[:<thread-id>]…` — the actual resume command, and the only
 ///    form that moves the target.
-fn is_resume(payload: &[u8]) -> bool {
+fn classify_client(payload: &[u8]) -> ClientEffect {
     let Some((&first, rest)) = payload.split_first() else {
-        return false;
+        return ClientEffect::None;
     };
     match first {
         // `c`, `c<addr>`, `s`, `s<addr>` — bare or with a resume address.
-        b'c' | b's' => rest.iter().all(|b| b.is_ascii_hexdigit()),
+        b'c' | b's' if rest.iter().all(|b| b.is_ascii_hexdigit()) => ClientEffect::Resume,
         // `C<sig>`, `S<sig>`, optionally `;<addr>`.
-        b'C' | b'S' => !rest.is_empty(),
-        // `R<XX>` — restart.
-        b'R' => true,
+        b'C' | b'S' if !rest.is_empty() => ClientEffect::Resume,
+        // `R<XX>` restart — the program is replaced and there is no reply, so the
+        // new state is not knowable from the packet.
+        b'R' => ClientEffect::Invalidate,
+        // `k` kill, `D` detach — the session is over as far as we can tell.
+        b'k' | b'D' => ClientEffect::Invalidate,
         b'v' => {
             if let Some(actions) = payload.strip_prefix(b"vCont;") {
                 // `vCont;t` is a *stop* request in non-stop mode; `vCont;c`,
                 // `;C`, `;s`, `;S` resume. Actions are `;`-separated and each may
                 // carry `:<thread-id>`.
-                return actions
+                let resumes = actions
                     .split(|&b| b == b';')
                     .filter_map(|a| a.first())
                     .any(|&a| matches!(a, b'c' | b'C' | b's' | b'S'));
+                return if resumes {
+                    ClientEffect::Resume
+                } else {
+                    ClientEffect::None
+                };
             }
-            // `vRun` and `vAttach` both start the program running.
-            payload.starts_with(b"vRun") || payload.starts_with(b"vAttach")
+            // `vRun` restarts the program and `vAttach` attaches to one. Neither
+            // implies a run state: both are answered by a stop reply when they
+            // halt, and an attach need not halt at all. See `ClientEffect`.
+            if payload.starts_with(b"vRun") || payload.starts_with(b"vAttach") || payload.starts_with(b"vKill") {
+                return ClientEffect::Invalidate;
+            }
+            ClientEffect::None
         }
-        _ => false,
+        _ => ClientEffect::None,
     }
 }
 
@@ -412,17 +450,74 @@ mod tests {
             b"s20000000",
             b"C05",
             b"S05",
-            b"R00",
             b"vCont;c",
             b"vCont;c:p1.-1",
             b"vCont;s:1",
             b"vCont;C05:1",
             b"vCont;t:1;c:2",
-            b"vRun;",
-            b"vAttach;1",
         ] {
-            assert!(is_resume(p), "should resume: {}", String::from_utf8_lossy(p));
+            assert_eq!(
+                classify_client(p),
+                ClientEffect::Resume,
+                "should resume: {}",
+                String::from_utf8_lossy(p)
+            );
         }
+    }
+
+    #[test]
+    fn attach_does_not_imply_a_run_state() {
+        // Attaching does NOT necessarily halt. GDB can attach either way, halting
+        // is only its default, and mcu-debug does both. So `vAttach` must leave us
+        // in Unknown -- claiming Running would be a guess, and claiming Stopped
+        // would be the guess that lets a consumer read a running target on a
+        // HaltedOnly server.
+        for p in [
+            &b"vAttach;1"[..],
+            b"vRun;",
+            b"vRun;2f62696e2f6c73",
+            b"R00",
+            b"k",
+            b"D",
+            b"vKill;1",
+        ] {
+            assert_eq!(
+                classify_client(p),
+                ClientEffect::Invalidate,
+                "should invalidate: {}",
+                String::from_utf8_lossy(p)
+            );
+        }
+    }
+
+    #[test]
+    fn attach_from_a_known_state_returns_to_unknown() {
+        let mut t = StateTracker::new();
+        t.observe(To, &pkt(b"c"));
+        t.observe(From_, &pkt(b"T05"));
+        assert_eq!(t.state(), TargetState::Stopped);
+        assert_eq!(t.last_signal(), Some(5));
+
+        // A fresh attach makes the old verdict meaningless.
+        assert_eq!(t.observe(To, &pkt(b"vAttach;1")), Some(TargetState::Unknown));
+        assert_eq!(t.last_signal(), None);
+        assert!(!t.state().readable(true));
+
+        // If this attach did halt, the stop reply settles it.
+        assert_eq!(t.observe(From_, &pkt(b"T05")), Some(TargetState::Stopped));
+    }
+
+    #[test]
+    fn attach_without_halt_stays_unknown_until_something_says_otherwise() {
+        // The no-halt case: nothing follows the attach that reveals the state, so
+        // we must not drift into an assumption.
+        let mut t = StateTracker::new();
+        t.observe(To, &pkt(b"vAttach;1"));
+        t.observe(From_, &pkt(b"OK"));
+        t.observe(To, &pkt(b"qSupported:multiprocess+"));
+        t.observe(To, &pkt(b"m20000000,4"));
+        t.observe(From_, &pkt(b"deadbeef"));
+        assert_eq!(t.state(), TargetState::Unknown);
     }
 
     #[test]
@@ -432,7 +527,7 @@ mod tests {
         // a resume would mark the target running during GDB's startup handshake,
         // while it is in fact halted, and the send gate would then refuse every
         // read on a HaltedOnly server for the rest of the session.
-        assert!(!is_resume(b"vCont?"));
+        assert_eq!(classify_client(b"vCont?"), ClientEffect::None);
     }
 
     #[test]
@@ -455,8 +550,8 @@ mod tests {
     #[test]
     fn vcont_stop_only_is_not_a_resume() {
         // `vCont;t` on its own is a stop request in non-stop mode.
-        assert!(!is_resume(b"vCont;t"));
-        assert!(!is_resume(b"vCont;t:1"));
+        assert_eq!(classify_client(b"vCont;t"), ClientEffect::None);
+        assert_eq!(classify_client(b"vCont;t:1"), ClientEffect::None);
     }
 
     #[test]
@@ -484,7 +579,12 @@ mod tests {
             b"stuff",
             b"cheese",
         ] {
-            assert!(!is_resume(p), "should not resume: {}", String::from_utf8_lossy(p));
+            assert_ne!(
+                classify_client(p),
+                ClientEffect::Resume,
+                "should not resume: {}",
+                String::from_utf8_lossy(p)
+            );
         }
     }
 
