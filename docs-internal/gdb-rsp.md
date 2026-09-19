@@ -1,0 +1,921 @@
+# GDB RSP Multiplexer in the Probe Agent — Design & Plan
+
+**Status:** Design agreed; **Phase 1 complete** — 77 tests across `frame`, `caps`, `packet` and
+`state`, all pure with no I/O. Code lives in `packages/mdbg/src/gdb_rsp/`; the orphan stub at
+`proxy_helper/proxy_server/gdb_rsp.rs` is gone. Phase 2 (the multiplexer) is next.
+Revised 2026-09-19.
+
+**Goal:** make the Probe Agent (`mdbg proxy`) a **multiplexer on the GDB Remote Serial Protocol
+connection to the gdb-server**. GDB becomes one client on that connection; the Agent's own
+features — RTT, PC-sampling profiling, ETB/ETF drain, stack probing — become others. This puts
+target memory access next to the probe, in Rust, instead of at the far end of two hops driven by a
+second GDB process.
+
+**Related:** [Proxy-Plan.md](./Proxy-Plan.md) (Funnel protocol, topologies),
+[Stream-Flow-Control.md](./Stream-Flow-Control.md) (the "never touch RSP" rule),
+[uart-management.md](./uart-management.md) (the `PortHandle` / `attach_client` pattern this design
+copies), [../AGENTS.md](../AGENTS.md) §"RTT: Two Modes".
+
+---
+
+## 1. What this is for
+
+Every planned feature reduces to **one primitive**: _read (and occasionally write) target memory,
+on demand, while the target is running._
+
+| Feature                  | What it actually needs                                                                   |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| RTT (alternate mode)     | Poll the SEGGER RTT control block: read `wrOff`, read ring bytes, write `rdOff`. ~40 Hz. |
+| DWT PC sampling          | Periodically read `DWT_PCSR` (`0xE000_101C`); one 4-byte read per sample.                |
+| Stack probing            | Read `SP`, then a window of stack memory; find the high-water mark.                      |
+| ETB / ETF trace drain    | Enable via CoreSight registers, then bulk-read the trace buffer.                         |
+| Capability / state model | `PacketSize`, `x`-packet support, ack mode, target run state — all free, by snooping.    |
+
+So this is not "an RSP feature framework". It is **one memory-access primitive plus a run-state
+model**, with the features as ordinary clients. Build the multiplexer well and the features are
+small.
+
+### Why not keep doing it the way we do now
+
+Today the primitive comes from a **second GDB process** — `LiveWatchMonitor`
+(`packages/mcu-debug/src/adapter/live-watch-monitor.ts`) — which connects to the same gdb port and
+is driven over GDB/MI. It works, and it is the proof that the servers themselves are happy to
+answer memory requests while the target runs. It costs a whole extra GDB process, a GDB/MI round
+trip per read, a per-core connection-limit bump the user's OpenOCD config has to load (§2), and it
+sits on the wrong side of the network hop in remote topologies.
+
+**The live GDB does not go away.** It is what translates _expressions_ (`myStruct.field[i]`,
+`&buf`) into memory accesses, using the DWARF it has loaded. That is a large amount of work we
+have no intention of reimplementing, and variables/live-watch keep using it. What moves to the
+Agent is the class of work that is _pure address-and-length polling at a fixed rate_ — RTT,
+sampling, trace — where GDB adds a round trip and contributes nothing.
+
+**The split is per feature, not a doctrine.** GDB is one tool available to us, used where it earns
+its place and skipped where it does not. The mux gives us the choice; nothing here obliges a
+feature to take either route, and some features have a real decision to make. Stack probing is the
+clearest example:
+
+- **Straight from Rust** — poll `SP` and the stack window on the mux. Higher sampling rate, and
+  strictly speaking GDB need not be involved at all beyond (possibly) initialisation.
+- **Through GDB** — let it drive the sampling and produce a proper backtrace after a halt, which is
+  work it is genuinely good at and we would otherwise be reimplementing.
+
+Neither is obviously right, and the answer may be "both, for different questions the user is
+asking". The rule is only this: **if GDB adds no value, or gets in the way, we do not use it** —
+and equally, if it does the job better, we do.
+
+### Why not just use the servers' own RTT
+
+We will keep offering server-side RTT, because sometimes it is the right answer (J-Link's
+implementation is genuinely high-throughput). But it is not a substitute:
+
+- **J-Link** exposes only **one** RTT channel through the gdb-server.
+- **OpenOCD** never polls to discover that the firmware has initialised the RTT control block. So
+  either something outside pokes it, or the user has to halt and type `rtt start` — unusable from
+  an IDE, for no good reason.
+- Neither offers the per-channel pre-decoder pipeline (e.g. `defmt-print`) we already have.
+
+Ours is up to 16 bidirectional channels, no manual start, decoders included. Offer both; let users
+choose.
+
+---
+
+## 2. Architecture: the Agent owns the socket
+
+**Decision (confirmed in review): one path for all servers.** The Agent owns the single TCP
+connection to the gdb-server's gdb port. GDB is a client of the Agent's multiplexer. There is no
+second connection to the server.
+
+```text
+Engineer Machine                      Probe Host (mdbg proxy = Probe Agent)
+┌──────────────┐                      ┌────────────────────────────────────────────────────┐
+│ GDB (main)   │─ local port ─┐       │  ProxyServer (one per session)                     │
+│ GDB (live)   │─ local port ─┤       │                                                    │
+│ TS DA        │              │       │   stream 3 (gdbPort) ──▶ ┌──────────────┐          │
+└──────────────┘              │       │                          │   RspMux     │          │
+       │ Funnel frames (one TCP conn.)│   RTT worker ──────────▶ │  (per core)  │─ TCP ──▶ │ gdb-server
+       └──────────────────────────────┼─  profiler ────────────▶ │              │          │ (one socket)
+                                      │   trace drain ─────────▶ └──────┬───────┘          │
+                                      │                                 │                  │
+                                      │                    send queue + pending FIFO       │
+                                      │                    (sole reader & writer)          │
+                                      └────────────────────────────────────────────────────┘
+```
+
+The mux is the **sole reader and sole writer** of that socket. That single fact is what makes the
+rest of the design tractable: the mux has total ordering knowledge, so it can match positional
+replies and untagged acks to the requests that caused them (§4).
+
+### The one remaining risk
+
+The mux depends on the gdb-server answering our requests on a connection where GDB already has a
+`c`/`vCont;c` outstanding. One way a server can refuse: **it only serves requests while the target
+is halted.** A server that gates _all_ packet handling on `TARGET_HALTED` gives us halted-only
+operation. Note this is about _state-free_ requests (memory/MMIO read/write); a server refusing
+_those_ while running is the disqualifying case.
+
+**For OpenOCD this is settled, from the source rather than by inference** — its memory-read path has
+no halt check at all. See §4.2.1, which reads the relevant parts of `gdb_server.c` and also corrects
+what pipelining can and cannot buy. For the other servers it stays a Phase-3 matrix item (§11
+item 17), and the outcome is a per-server-type capability tier (§7), not a yes/no.
+
+### The connections to a gdb port are not equals — and that argues for the mux
+
+Two facts we know from having built live watch, both of which a second-connection design has to
+fight and the mux gets for free:
+
+1. **Connection slots are rationed, per core, with a default of 1.** OpenOCD's
+   `-gdb-max-connections` is a **per-target** property whose default is 1 (vendor-defined in the
+   general case). Live watch only works because `CDLiveWatchSetup` in
+   `packages/mcu-debug/support/openocd-helpers.tcl` walks `[target names]` and increments the limit
+   on each one. That is a Tcl helper the user's config must load before `init` — a real setup
+   burden, and one that has no analogue on other servers.
+2. **Only the first connection is told what the target is doing.** Run/stop replies go to the
+   first connection; the second gets silence. This is why `LiveWatchMonitor` subscribes to the
+   **main** session's running/stopped events instead of its own GDB's — see the comment at
+   `live-watch-monitor.ts:139`, which attributes it to non-stop mode. The likelier explanation is
+   this asymmetry: the server never sent the second connection a stop reply at all. Educated guess,
+   but it fits the observed behaviour better than the non-stop story does.
+
+Under the mux there is exactly one connection to the server and **we are it**, so:
+
+- No connection-limit bump is needed for the Agent's own consumers. The `CDLiveWatchSetup` hack
+  remains only for as long as `duplicateStream` gives additional GDB clients their own server
+  connections (§4.7) — and disappears entirely under the maximal version of the mux.
+- **The run/stop state model comes to us directly**, on the connection the server actually talks
+  to, rather than being reconstructed second-hand. The state model in §3.10 is therefore not best
+  effort; it is the server's own view.
+
+Together these are the strongest argument for the choice made in this section, and they were not
+obvious when the design first went the other way.
+
+### It is GDB that forbids inspection while running, not the server
+
+Worth stating plainly, because it is the whole justification for this work: the prohibition on
+reading target memory while the target runs is **GDB's** rule, from the all-stop protocol model it
+presents to the user. The gdb-servers themselves generally have no such restriction — a Cortex-M
+read over AHB-AP does not need the core halted. Injecting our own requests alongside GDB's is
+therefore not a workaround for a server limitation; it is how we decline to inherit a _client_
+limitation we never needed. RISC-V implementations may allow bus access or not (vendors choice)
+
+Non-stop mode is **not** part of this design. It requires per-thread execution control — some
+threads running while others are stopped — which is not a thing on an MCU, and effectively nothing
+in our server list implements it. Left as a matrix line item to confirm, not as a dependency.
+
+### What "GDB's transactions are sacred" now means
+
+We are interleaving, so the invariant must be stated precisely rather than as a slogan:
+
+1. **GDB's bytes are forwarded verbatim** — never modified, never dropped, never reordered
+   relative to each other. Likewise every server reply destined for GDB.
+2. **GDB's traffic has strict priority** in the send queue. One of our packets is sent only when
+   doing so cannot delay a GDB packet already queued. GDB never waits on us except where the
+   protocol itself serialises (one reply at a time on the wire).
+3. **`\x03` bypasses everything.** It is not a packet; it is forwarded the instant it arrives.
+4. **We never emit a packet that mutates connection-scoped state GDB depends on.** See §3.10 —
+   this was merely advisable with a second connection; on a shared socket it is the difference
+   between working and corrupting the user's debug session.
+5. **Replies destined for GDB are forwarded as the original bytes**, including their original
+   run-length encoding and escaping. We decode a copy for snooping; we never re-encode.
+
+---
+
+## 3. RSP facts that constrain the design
+
+Each of these kills an otherwise-reasonable implementation.
+
+1. **Framing.** `$<data>#<cc>`, where `cc` is two lowercase hex digits of `sum(data) mod 256`.
+2. **Acks.** `+` / `-` per packet in both directions, _unless_ no-ack mode is active. The stub
+   advertises `QStartNoAckMode+` in its `qSupported` reply; **GDB** then sends
+   `QStartNoAckMode`, and after the `OK` neither side acks again. In practice GDB does this
+   immediately on connecting to any server that offers it (OpenOCD does), so a session is in ack
+   mode only for its first few packets. We must implement **both modes and the exact switch
+   point** — see §4.3, where ack accounting becomes the mux's job.
+3. **Escaping.** Inside packet data, `}` escapes the next byte as `byte ^ 0x20`, applied to `#`,
+   `$`, `}` and `*`. Present in every binary payload (`X`, the `x` reply, `qXfer`, `vFile`).
+4. **Run-length encoding**, stub→GDB only. See §5 — it is not conventional RLE and the encodable
+   counts have holes in them.
+5. **`\x03` is not a packet.** A bare Ctrl-C byte outside framing, sent by GDB to interrupt a
+   running target. The codec must pass it through without trying to frame it.
+6. **Notifications.** In non-stop mode the stub sends `%Stop:…` unsolicited, drained by GDB with
+   `vStopped`. Not replies, not acked. We must recognise them so they never retire a pending
+   request, even though we do not expect to see them.
+7. **`O` and `F` arrive mid-transaction.** `O…` (console output) and `F…` (file-I/O request) can
+   appear between a request and its real reply. "A packet arrived" is not "the reply arrived".
+8. **RSP has no request ids. Replies are positional.** This is the real constraint — not "one
+   outstanding request". Pipelining is legal for anyone who knows the order packets went out in,
+   and the mux knows by construction. §4.2 exploits this.
+9. **All-stop makes `c` open-ended.** GDB's `c` / `vCont;c` has no reply until the target stops —
+   possibly never. A pending-request model that assumes replies arrive promptly will wedge.
+10. **Two kinds of shared state, at two different scopes.** This distinction matters more than it
+    looks, because the two scopes fail differently.
+
+    **Per-connection (framing and view).** Negotiated once per socket; every later packet on that
+    socket is interpreted in it.
+    - `qSupported`, `QStartNoAckMode`, `QNonStop` — framing and reply-timing mode for _everything_
+      after. Re-negotiating mid-session corrupts the stream from that byte on.
+    - `Hg` / `Hc` — selected thread for subsequent `g`/`p`/`m`. If we set it, GDB's next register
+      read silently reads the wrong context.
+    - `qXfer` — GDB reads objects in offset-windowed chunks; a reply to the wrong asker desyncs it.
+
+    **Per-core (the debug session itself).** Shared by every connection to that core's gdb port,
+    because it _is_ the target, not a view of it.
+    - Run/stop state. One core is running or halted; there is no per-connection answer. But the
+      server only _reports_ transitions to the first connection (§2) — so the state is shared
+      while the notification is not.
+    - `Z` / `z` — the breakpoint table is target state on most servers, so a stray `z` from us
+      removes a breakpoint the user set, on every connection at once.
+    - Reset, halt, resume, flash writes — all of it lands on the core.
+
+    The rule that follows covers both: **we emit only packets that touch neither scope.** `m`,
+    `M`, `x`, `X` and `qRcmd` qualify. `Hg`, `Z`/`z`, `QNonStop`, `QStartNoAckMode`, `qSupported`,
+    `qXfer`, `c`, `s`, `vCont`, `k`, `R` do not, and are unconditionally forbidden to us (§4.5).
+
+    The practical consequence of the per-core half is that **the mux's `TargetState` is a property
+    of the core, shared by all consumers and all GDB clients on it** — one state machine per mux,
+    not one per attached client (§4.7).
+
+---
+
+## 4. The multiplexer
+
+### 4.1 Sources, queues, and routing
+
+```rust
+/// Who a request came from, so its reply can be routed back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RspSource {
+    /// The user's GDB, on a funnel stream. Bytes in and out are verbatim.
+    Gdb(u8),
+    /// One of our internal consumers (RTT, profiler, trace drain).
+    Agent(ConsumerId),
+}
+
+struct Pending {
+    source: RspSource,
+    /// Our own monotonic id. Not on the wire — RSP has no request ids (§3.8);
+    /// this exists for logging, timeouts and retiring the FIFO head.
+    seq: u64,
+    kind: PacketKind,
+    sent_at: Instant,
+    /// Set for `c`/`s`/`vCont;c` — no reply until the target stops (§3.9).
+    open_ended: bool,
+}
+```
+
+The mux holds one `VecDeque<Pending>` in send order. Every frame the reader thread decodes either
+retires the head (a reply), or does not (an ack, an `O`, an `F`, a `%` notification, a `\x03`).
+Retiring the head yields the `source`, which says where the bytes go:
+
+- `Gdb(stream_id)` → forward the **raw** reply bytes as a funnel frame on that stream.
+- `Agent(id)` → decode and complete that consumer's one-shot.
+
+### 4.2 Pipelining
+
+**Read the server-behaviour findings in §4.2.1 before tuning this.** The short version: the servers
+are strictly serial, so pipelining buys much less than it appears to, and in ack mode it is
+actively unsafe. Implement `depth = 1` first; treat `depth = 2` as a measured optimisation gated on
+no-ack mode, configurable, with a per-server override from the matrix (§11 item 17).
+
+The send gate — the whole policy in one predicate:
+
+```rust
+fn may_send_agent_packet(&self) -> bool {
+    self.handshake_settled                  // ack mode + first stop reply observed (§4.4)
+        && self.gdb_send_queue.is_empty()   // invariant 2: GDB never waits on us
+        && self.pending.len() < self.depth
+        && !self.pending.iter().any(|p| p.kind.is_file_io())   // F reply must follow its request
+        && (self.answers_while_running || self.state == TargetState::Stopped)
+}
+```
+
+Note what is _not_ in the gate: the presence of an `open_ended` GDB `c` in the FIFO. That is
+exactly the case we need to work, and whether it does is the `answers_while_running` capability.
+A server without it degrades to halted-only, and the gate says so honestly.
+
+GDB's packets are never gated. They go out as they arrive, ahead of anything of ours that is
+queued but unsent.
+
+### 4.2.1 What the servers actually do — read from OpenOCD's source
+
+These are not inferences. `src/server/gdb_server.c` in the OpenOCD tree settles four things, and
+the shape is expected to be common to the others: they are single-threaded, and they read the first
+byte of the next packet only _after_ replying to the last one. Ctrl-C arrives through that same
+path, not a side channel.
+
+**1. The risk in §2 is resolved for OpenOCD: memory reads are not gated on halt.**
+`gdb_input_inner`'s dispatch switch sends `'m'` straight to `gdb_read_memory_packet`, which calls
+`target_read_buffer` with **no check on `target->state` or `frontend_state`**. Same for `'M'`. So a
+memory request arriving while the target runs is served, exactly as this design needs. Combined
+with the "lingering reply" comment in `gdb_frontend_halted` — which is OpenOCD's own name for the
+open-ended `c` of §3.9 — the interleaving this design depends on is something OpenOCD's structure
+already accommodates.
+
+**2. Pipelining is unsafe in ack mode, and safe in no-ack mode.** After writing a reply,
+`gdb_put_packet_inner` does:
+
+```c
+if (gdb_con->noack_mode)
+        break;
+retval = gdb_get_char(connection, &reply);   /* expects '+' or '-' */
+...
+} else if (reply == '$') {
+        LOG_ERROR("GDB missing ack(1) - assumed good");
+        gdb_putback_char(connection, reply);
+```
+
+So in **ack mode** a second packet sent before we acked the first reply lands where the `+` was
+expected. OpenOCD recovers — it puts the `$` back and logs "GDB missing ack" — but that is an error
+path, and nothing says another server is as forgiving. In **no-ack mode** it breaks out
+immediately and the next packet is read normally.
+
+> **Rule:** `depth > 1` requires no-ack mode. The handshake quiet period (§4.4) already prevents us
+> sending anything before the mode has settled, so this costs nothing to enforce.
+
+**3. Pipelining's benefit is small, and not the one stated above.** `gdb_input_inner` wraps its
+dispatch in `do { … } while (gdb_con->buf_cnt > 0)`, so it does drain several queued packets per
+wakeup rather than returning to `select()` between them. But it handles them **strictly in
+sequence** — there is no overlap of the SWD work itself, because there is one thread. So depth 2
+does not keep the probe busier; it only removes the loopback round trip and our own scheduling from
+between consecutive requests. Against SWD reads measured in hundreds of microseconds, that is
+noise. Worth measuring, not worth designing around.
+
+**4. A stray ack in no-ack mode is noticed.** `gdb_get_packet_inner` logs
+`"acknowledgment received, but no packet pending"` for a `+` once `noack_mode > 1`. So the rule in
+§4.3 — ack only in ack mode, never in no-ack mode — is enforced by the server's log if we get it
+wrong. Useful during bring-up: that warning in OpenOCD's output means the mux's ack accounting is
+broken.
+
+### 4.3 Ack accounting is now our problem
+
+In ack mode, acks are untagged — a bare `+`. On a shared socket this would be hopeless except for
+the sole-writer property: the mux knows the exact order it wrote packets, so the server's acks come
+back in that order. Concretely:
+
+- The server's `+` for **GDB's** packet → forward to GDB.
+- The server's `+` for **our** packet → swallow it. Forwarding it would give GDB an ack it never
+  earned, and GDB counts.
+- A reply destined for **us** must be acked _by us_ — the server is waiting for one and will
+  retransmit otherwise.
+- A `-` means resend the packet at that position. Three failures on one of ours is a fatal channel
+  error for that consumer; three on GDB's is a fatal channel error for the session.
+
+And the switch point: when the mux sees GDB's `QStartNoAckMode` and the server's `OK`, it flips
+both directions of its codec **at that exact byte boundary**. A one-packet error here desynchronises
+everything after it. This deserves its own test with a captured transcript.
+
+### 4.4 Handshake quiet period
+
+No Agent packet is sent until the mux has observed:
+
+1. GDB's `qSupported` exchange complete (so `RspCaps` is known — `PacketSize` in particular, which
+   bounds our reads), **and**
+2. ack mode settled (either `QStartNoAckMode`+`OK` seen, or GDB's first few packets acked such
+   that we know it is staying in ack mode), **and**
+3. a first stop reply, so `TargetState` is not `Unknown`.
+
+This costs nothing — no consumer has anything useful to do before the session is connected — and
+removes a whole class of startup races.
+
+### 4.5 Forbidden packets — a single choke point
+
+Every outbound Agent packet passes through one function that rejects, with a `debug_assert` and a
+hard error in release:
+
+- **Execution control:** `c`, `C`, `s`, `S`, `vCont;*`, `R`, `vRun`, `vAttach`, `k`, `\x03`,
+  `vCtrlC`. The user's GDB owns execution. A profiler that halts the target to sample it is
+  measuring itself.
+- **Breakpoints/watchpoints:** `Z`, `z`.
+- **Mode and selection:** `Hg`, `Hc`, `QNonStop`, `QStartNoAckMode`, `qSupported`.
+- **Transfers GDB is mid-way through:** any `qXfer`.
+
+OpenOCD documents essentially this contract for its own second-connection case — the extra client
+must run with `set remote interrupt-on-connect off` and must never pause, continue or step. We get
+the `interrupt-on-connect` half for free by speaking raw RSP: we simply never send `\x03`.
+
+**Allowed:** `m`, `M`, `x`, `X`, and `qRcmd` (monitor) subject to review per command.
+
+**Deferred, with caveats:** `g` / `p` (register read). Almost certainly requires the target
+halted, and formally depends on `Hg` — which we are forbidden to set. On a single-core MCU the
+selected thread never changes, so reading with whatever GDB selected is probably right; that
+"probably" is why it is deferred rather than in the first cut. Stack probing needs `SP`, so this
+becomes real at Phase 4 item 23, not before.
+
+### 4.6 Threading and placement in `ProxyServer`
+
+Today a gdb RSP stream is asymmetric, and this dictates the shape:
+
+- **server → GDB** runs on a per-stream thread: `read_and_forward()` in
+  `proxy_helper/proxy_server/gdb_server.rs`.
+- **GDB → server** runs on the **message-loop thread**: `ProxyEvent::IncomingData` is demuxed in
+  `message_loop()` (`proxy_server/mod.rs`) and written straight to `pinfo.stream`.
+
+The mux takes ownership of the server socket in place of `PortInfo.stream` for
+`StreamKind::GdbRsp` streams, and owns two threads of its own:
+
+- a **reader thread** (replacing that stream's `read_and_forward`) which decodes frames, updates
+  state, retires the FIFO, and emits `ProxyEvent::StreamData` for GDB-destined bytes;
+- a **writer thread** draining the send queue, so that nothing — not a slow server, not a full
+  socket buffer — can block the message loop.
+
+`feed_from_gdb(&bytes)` is therefore _enqueue and return_. It is called on the message-loop thread
+and must never block. This is a hard requirement: the message loop is single-threaded and already
+warns when a request waits 250 ms behind other work.
+
+### 4.7 One mux per core
+
+One mux per gdb port, i.e. per core — mirroring the existing one-TCP-port-per-core allocation, for
+the servers that support multiple cores at all. Internal consumers attach to the mux for the core
+they care about.
+
+This is not merely a convenient unit. §3.10 says the debug session's state — run/stop, breakpoints,
+reset — **is** per core, and §2 says the connection limit is a per-core property too
+(`-gdb-max-connections` is set per target). So "one mux per core" is the granularity the servers
+themselves already use, and one `TargetState` machine per mux is the right count.
+
+**Scoping assumption, stated so it can be corrected cheaply:** `handle_duplicate_stream()` keeps
+its current behaviour — each additional GDB client (the live-watch GDB, a second user GDB) gets its
+**own** TCP connection to the server, as today. The mux virtualises _our_ consumers against _one_
+GDB, not multiple GDBs against one socket.
+
+The maximal version — all GDB clients _and_ all our consumers on a single server socket per core —
+has grown more attractive in light of §2:
+
+- It would make live watch work even on a strictly single-connection server.
+- It would **remove the need for `CDLiveWatchSetup` entirely** — no `-gdb-max-connections` bump, no
+  Tcl helper the user has to load before `init`, and no equivalent to invent for every other
+  server.
+- It would let the mux _give_ the live GDB the run/stop state the server refuses to send a second
+  connection, since the mux hears it on the first one. That is a capability the current architecture
+  cannot provide at all.
+
+Against that, it requires the mux to **virtualise per-connection state per client** (§3.10, first
+half): separate `qSupported` negotiation, separate ack mode, separate `Hg`, separate `qXfer`
+windows, and an ownership policy for `Z`/`z` — which is per-core state that two GDBs would both
+believe they own. That last one is the hard part and is not a small design. Out of scope here;
+recorded in §12 q4, and the Phase-2 FIFO should be written so as not to preclude it.
+
+### 4.8 How mux clients must behave
+
+The mux enforces what it can (§4.5), but most of the discipline has to live in the clients — RTT,
+the profiler, the trace drain. **GDB behaves well implicitly**, because it is a mature RSP client
+that negotiates before it acts. Our clients have to do the same thing explicitly, and they are the
+ones being written from scratch:
+
+- **Check the capability before using it, every time.** Never send a packet on the hope that this
+  server supports it. `RspCaps` and the tier in §7 exist to be consulted, not to be logged.
+- **If a capability needed for a feature is absent, find another way or decline the feature.** Say
+  "not supported with this gdb-server" plainly and stop. Do not degrade into probing, retrying, or
+  guessing — a client that keeps trying something the server does not do is how a stable session
+  becomes an unstable one.
+- **Never send anything speculative.** No capability probes of our own, no "let's see if this
+  works" packets. Whatever we learn, we learn by watching GDB's negotiation (§4.4) or from the
+  tier table.
+- **Assume nothing about atomicity.** A read while the target runs can tear (§12 q6). Clients that
+  care must validate what they read — the RTT ring protocol already does — rather than assuming the
+  mux gives them a coherent snapshot. It does not, and cannot.
+
+This is a rule about our code, not about any particular server, and it is worth stating because the
+cost of getting it wrong is not a failed read — it is a destabilised debug session that the user
+will blame on the debugger.
+
+---
+
+## 5. Run-length encoding — what the manual is actually saying
+
+You are right to find the GDB manual confusing here, and the "5 or 6" memory is a real thing.
+It is not conventional RLE and it has holes.
+
+**The encoding.** In a stub→GDB reply, `*` means: the character _before_ the `*` repeats, and the
+character _after_ the `*` encodes the count as `chr(n + 29)`. So the count character is decoded as
+`n = byte - 29`. GDB's own `read_frame()` in `remote.c` computes it as `c - ' ' + 3`, which is the
+same thing (`c - 32 + 3`).
+
+**Where the "5/6" comes from.** The manual says the count characters `$`, `#`, `+` and `-`, and
+anything above ASCII 126, must not be used. Work those back through `n = byte - 29` and you get a
+set of counts that simply **cannot be expressed**:
+
+| Excluded character | ASCII | Unencodable count `n` | Why excluded                                   |
+| ------------------ | ----- | --------------------- | ---------------------------------------------- |
+| `#`                | 35    | 6                     | **Structural** — framing terminates at `#`     |
+| `$`                | 36    | 7                     | **Structural** — framing resynchronises at `$` |
+| `+`                | 43    | 14                    | Convention — would confuse an ack scanner      |
+| `-`                | 45    | 16                    | Convention — would confuse an ack scanner      |
+
+So the encodable counts are `n` in `[3, 97]` **minus `{6, 7, 14, 16}`**. The floor of 3 is because
+below that the encoding does not save space; 97 is the ceiling because `chr(126)` is the last
+printable byte. A run of exactly 6 or 7 has to be emitted some other way (literally, or as a
+shorter run plus literals) — which is almost certainly the "5/6 repeats" detail you remember, read
+back the wrong way round.
+
+**The two exclusion reasons are not the same, which the implementation made obvious.** Counts 6 and
+7 are not merely forbidden by the spec — they are **impossible to represent at all**, because the
+framing layer consumes `#` and `$` before any payload decoder sees them. GDB's `read_frame()` is
+built the same way: `case '#'` is an unconditional terminator and `case '$'` logs _"Saw new packet
+start in middle of old one"_ and restarts. Counts 14 and 16, by contrast, are only conventionally
+excluded; `+` and `-` are ordinary bytes between `$` and `#` and decode fine. `frame.rs` has a test
+for each group, asserting the impossibility of the first and the acceptance of the second.
+
+**What this means for us: nothing, in the good direction.** We only ever **decode** RLE (it is
+stub→GDB only, and we never emit it), so the holes do not constrain us — a decoder just computes
+`n = byte - 29` and accepts whatever arrives. And per invariant 5 (§2), GDB-destined replies are
+forwarded as the original bytes, so we never have to re-encode a run.
+
+### Settled from source — `gdb/remote.c`, `read_frame()`
+
+Phase 1 item 2 is done. All three answers come from GDB's own decoder, which is the definition of
+correct here regardless of what the prose says.
+
+**`n` is the number of _additional_ copies, not the total.**
+
+```c
+repeat = c - ' ' + 3;            /* == c - 29 */
+/* The character before ``*'' is repeated.  */
+if (repeat > 0 && repeat <= 255 && bc > 0)
+  {
+    memset (&buf[bc], buf[bc - 1], repeat);
+    bc += repeat;
+```
+
+The literal character is already in the buffer at `bc - 1`, and `repeat` more are appended. So a
+run of length `L` encodes as the character plus `*` plus `chr(L - 1 + 29)`, and `0*<space>`
+decodes to **four** zeros (`n = 32 - 29 = 3`, plus the literal). Total run = `1 + n`.
+
+**GDB's decoder is lenient**, and ours should match it rather than enforcing the encoder's rules:
+it accepts any `repeat` in `1..=255` — below the `n >= 3` floor and above the 97 ceiling — and
+requires only `bc > 0`, i.e. a `*` may not be the first character of a payload. Rejecting counts
+the encoder is not supposed to produce would make us stricter than GDB for no gain.
+
+**The checksum covers the _encoded_ bytes, not the expanded ones.** `read_frame` does `csum += c`
+for both the `*` and the count character as it goes. So the verifier must sum the raw bytes as
+received; summing the expanded payload gives the wrong answer for any reply containing a run.
+This is the one place the `raw`/`decoded` split in `Frame` (§6) is load-bearing for correctness
+rather than just for forwarding.
+
+**GDB does not verify the checksum in no-ack mode at all** — `read_frame` returns early on
+`rs->noack_mode`, on the stated grounds that without acks there is no way to ask for a
+retransmission. **We verify regardless.** We are not obliged to accept what we cannot re-request:
+a corrupt frame can be reported as garbage and, if it was a reply to one of our memory reads,
+failed to that consumer. Silently handing a client corrupted target memory is a worse outcome than
+a failed read, and unlike GDB we have a channel-level error path to use.
+
+### Settled from source — the `x` reply, and a chunking bound
+
+From `remote_target::remote_read_bytes_1`:
+
+**The `x` reply is `b` followed by escaped binary data.** `if (*p != 'b') return TARGET_XFER_E_IO;`
+then `p++` and `remote_unescape_input`. An **empty** reply means the stub does not implement `x`,
+and GDB falls back to `m` and remembers — so `x` support is detectable by trying it, not only from
+`binary-upload+`. We do not probe (§4.8), so for us it is the feature bit; the empty-reply case is
+worth handling as a graceful fallback rather than an error.
+
+**Chunk at `packet_size / 2`, not `packet_size`.** GDB caps a single read at
+
+```c
+todo_units = std::min (len_units, (ULONGEST) (buf_size_bytes / unit_size) / 2);
+```
+
+The `/ 2` is there because `m` returns two hex characters per byte, and GDB applies it for `x` as
+well rather than tracking two limits. Mirroring that is both correct for `m` and safely
+conservative for `x`, and it is one less thing to get wrong per server.
+
+---
+
+## 6. Module layout
+
+New directory `packages/mdbg/src/gdb_rsp/` — crate-level, **not** under `proxy_helper`, because
+§8 requires it to be reachable from more than one entry point.
+`proxy_helper/proxy_server/gdb_rsp.rs` shrinks to the glue that wires a mux into `ProxyServer`.
+
+| File                  | Contents                                                                                                                                                          |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gdb_rsp/mod.rs`      | Public surface: `RspMux`, `RspSource`, `ConsumerId`, `RspError`, `TargetState`, `RspCaps`.                                                                        |
+| `gdb_rsp/frame.rs`    | `PacketCodec`: incremental byte stream → `Frame`. Escaping, RLE decode, checksum verify, ack-mode switch, `\x03` passthrough, `%` notifications. Pure, no I/O.    |
+| `gdb_rsp/packet.rs`   | Builders/parsers for what we care about: `m`/`M`/`x`/`X`, `?`, `qSupported`, `QNonStop`, `QStartNoAckMode`, `vCont`, stop replies. Hex and binary-escape helpers. |
+| `gdb_rsp/caps.rs`     | `RspCaps` — parsed `qSupported` reply, plus the per-server-type capability tier (§7).                                                                             |
+| `gdb_rsp/state.rs`    | `TargetState` + the transition table driven by observed resume packets and stop replies.                                                                          |
+| `gdb_rsp/mux.rs`      | `RspMux`: owns the socket, reader + writer threads, send queue, pending FIFO, ack accounting, the send gate, the forbidden-packet choke point.                    |
+| `gdb_rsp/consumer.rs` | Consumer registration (`attach`/`detach`, id-keyed, copied in shape from `serial/port.rs`), the `read_memory`/`write_memory` API, one-shot reply plumbing.        |
+| `gdb_rsp/tests/`      | Codec and state unit tests; mock-stub integration tests; recorded-transcript fixtures.                                                                            |
+
+### Frame type — the API detail that enforces invariant 5
+
+```rust
+pub struct Frame<'a> {
+    /// The original bytes, exactly as received, including framing, escapes and RLE.
+    /// This is what gets forwarded to GDB. Never re-encode.
+    pub raw: &'a [u8],
+    /// Unescaped, RLE-expanded payload — for our own inspection only.
+    pub decoded: Cow<'a, [u8]>,
+    pub kind: FrameKind,
+}
+
+pub enum FrameKind {
+    Packet,          // a normal request or reply
+    Notification,    // `%Stop:…`
+    Ack, Nack,
+    Interrupt,       // bare 0x03
+    ConsoleOutput,   // `O…`   — never retires a pending request
+    FileIo,          // `F…`   — never retires; blocks the send gate
+    Garbage,         // bad checksum or junk before `$`
+}
+```
+
+Carrying `raw` alongside `decoded` is not a convenience; it is how "forwarded verbatim" becomes
+something the compiler helps with rather than something a reviewer has to notice.
+
+### Replacing the current stubs
+
+The existing `GdbRsp` enum (`QNonStop`, `qSupported`) goes away — a flat enum of packet _names_ is
+the wrong shape; the work splits into a codec, typed builders and a capability struct. Two further
+corrections to the stub as written:
+
+- `memory_read_type` must default to **`Hex`** (`m`), not `XPackets`. `m` is mandatory for every
+  stub; `x` is optional and negotiated via `binary-upload+`. Under the mux we learn which from
+  GDB's own `qSupported` exchange, for free.
+- `vContSupported` → `vcont_supported`. Rust is snake_case and clippy runs at `-D warnings`
+  (AGENTS.md), so the camelCase form will not compile clean.
+
+---
+
+## 7. Per-server capability tiers
+
+Not a blacklist with two values — three tiers, decided per `servertype`, recorded in `caps.rs`
+and surfaced to the user once per session when it is not `Full`:
+
+| Tier          | Meaning                                                  | Consequence                                                                                                                                                           |
+| ------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Full`        | Answers state-free requests while the target runs.       | Everything works: RTT, sampling, trace.                                                                                                                               |
+| `HaltedOnly`  | Answers only while halted.                               | The send gate blocks while running. Still useful — flush RTT on stop, read state on halt — but no live RTT, no sampling. Say so plainly rather than appearing broken. |
+| `Unsupported` | Mishandles interleaved packets, or breaks GDB's session. | Agent-side features off; fall back to server-side RTT and the live-GDB path, with a one-time notice.                                                                  |
+
+**probe-rs is the interesting case.** It is believed not to allow a second gdb connection — which
+under this design does not matter at all, since we do not open one — while possibly allowing
+requests while running. If so, the mux makes probe-rs work where a second-connection design could
+not. That is a point in favour of the choice made in §2, and it is a matrix item, not a claim.
+
+### The matrix to fill in
+
+Phase 3 item 17 answers these per server and records the answers here. OpenOCD's column came from
+reading `gdb_server.c` (§4.2.1) — where a server ships source, read it; it is faster and far more
+definite than probing.
+
+| Question                                                          | Why it matters                                                                                             | OpenOCD                                                                                  | J-Link | pyOCD | ST-LINK | probe-rs | QEMU |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------ | ----- | ------- | -------- | ---- |
+| Answers `m`/`x` while a GDB `c` is outstanding?                   | The one thing the design depends on.                                                                       | **Yes** — no halt gate on the read path                                                  | ?      | ?     | ?       | ?        | ?    |
+| Tolerates `depth = 2` in no-ack mode? Less tolerant than OpenOCD? | Sets the pipelining rule.                                                                                  | **Yes** in no-ack; warns and recovers in ack mode                                        | ?      | ?     | ?       | ?        | ?    |
+| `PacketSize`? Advertises `binary-upload+`?                        | Bounds our chunking; picks `x` over `m`.                                                                   | **16384** (`GDB_BUFFER_SIZE`); **no `binary-upload`** — OpenOCD has no `x` packet at all | ?      | ?     | ?       | ?        | ?    |
+| Advertises `QNonStop+`, and honours it?                           | Confirms it is as irrelevant as §2 assumes.                                                                | ?                                                                                        | ?      | ?     | ?       | ?        | ?    |
+| Connection limit — default, and per core?                         | Says whether the maximal mux (§4.7) removes a real setup burden elsewhere or only on OpenOCD.              | **`-gdb-max-connections`, per target, default 1**                                        | ?      | ?     | ?       | ?        | ?    |
+| Run/stop replies to connections after the first?                  | Confirms or refutes §2's explanation of what live watch sees. Cheap: second raw RSP client, resume, watch. | ?                                                                                        | ?      | ?     | ?       | ?        | ?    |
+| **Tier (§7)**                                                     |                                                                                                            | ?                                                                                        | ?      | ?     | ?       | ?        | ?    |
+
+**`ServerTier::Unknown` currently gates as `HaltedOnly`, and that default is provisional.** It is
+the conservative reading for a server we know nothing about, and it is what `caps.rs` ships with.
+But once five or so servers have been measured, the right default is whatever turns out to be
+_common_ — if nearly all of them answer while running, defaulting an unmeasured server to
+`HaltedOnly` is pessimism that costs real features for no benefit. Revisit after item 17. Changing
+it is a one-line edit to `ServerTier::allows_while_running` plus its test, deliberately kept that
+cheap.
+
+Until this is filled in, the design's viability beyond OpenOCD rests on inference from live watch
+working on J-Link — one data point, taken on a _second_ connection rather than an interleaved one.
+
+---
+
+## 8. All sessions should go through the Agent
+
+`ServerSession.startServer()` only builds a `ProxyClient` when `args.hostConfig` is set
+(`packages/mcu-debug/src/adapter/server-session.ts:73`). In the plain local case — probe on the
+same machine as the DA, which is most users — `mdbg proxy` is not in the data path at all, and GDB
+connects to the gdb-server directly. **A mux that is not in the data path cannot mux anything.**
+
+The mechanism to fix this already exists: `hostConfig.type = "local"`
+(`packages/mcu-debug/src/adapter/servers/common.ts:294` — _"`local` is internal/testing only, not
+exposed in package.json schema"_), and the serial subsystem already uses it. So the route is:
+**make every debug session run through the Agent on loopback**, exposed or not.
+
+This is now the preferred outcome for its own sake, independent of this feature — one data path,
+one implementation, one set of behaviours to test — and the singleton work
+([Singleton-Tier1-Plan.md](./Singleton-Tier1-Plan.md)) already makes a long-lived local Agent
+ordinary. The alternative (a separate `mdbg` subcommand the DA spawns for local sessions, sharing
+the `gdb_rsp` module but not the proxy) exists as a fallback and is why §6 puts the engine at
+crate level, but it is second choice.
+
+**Blocking for Phase 4.** Phases 1–3 are unaffected: the codec, the mux and its tests are the same
+code either way.
+
+---
+
+## 9. Rejected alternatives
+
+**A second RSP connection to the server (the "companion" design).** The Agent opens its own
+connection per core and never touches GDB's socket, making the sacredness invariant structural.
+Rejected on four counts, and the last two only became clear in review:
+
+1. It requires every server to accept a second connection on the gdb port — which at least one
+   (probe-rs) is believed not to — so it needs a second code path for the servers that refuse.
+   The mux needs only _one_ server behaviour (answers state-free requests while running); the
+   companion needs _two_.
+2. A second connection is not free even where allowed: the slot has to be bought, per core, from a
+   limit whose default is 1 (§2). On OpenOCD that means shipping and loading `CDLiveWatchSetup`;
+   on other servers it means finding the equivalent, or discovering there is none.
+3. **A second connection is second class.** The server sends run/stop replies only to the first
+   connection, so a companion would have to reconstruct target state by snooping GDB's socket
+   anyway — reintroducing the observer this design was trying to delete, and leaving the state
+   model permanently second-hand.
+4. It cannot ever offer what the maximal mux can (§4.7): giving the live GDB the state the server
+   withholds from it.
+
+Preserved here because if a server turns out to mishandle interleaved packets but accept a second
+connection, this is the contingency for that server.
+
+**Non-stop mode.** Needs per-thread execution control, which MCUs do not have and our servers do
+not implement. Not a dependency; a matrix line to confirm.
+
+**Interrupting the target to read memory.** Perturbs the program under measurement. A profiler
+that halts to sample, or RTT that halts to drain, is not measuring the user's system.
+
+**Server side channels (OpenOCD tcl port, J-Link's own ports).** Per-server, so N
+implementations, and some servers have nothing. Reserve for a server that lands in `Unsupported`
+and matters enough to warrant special-casing.
+
+**Retiring the live-GDB path.** Not possible and not wanted: GDB does the DWARF work that turns
+an expression into an address. Live watch and variables stay on it. Only fixed-rate
+address-and-length polling moves to the Agent.
+
+---
+
+## 10. Testing
+
+The codec and state machine are pure functions over byte slices. Test them hard — everything rests
+on them.
+
+- **`frame.rs` unit tests.** Fuzz the chunk-split points (a packet arriving in N arbitrary reads
+  must decode identically); escapes spanning a boundary; RLE expansion including the excluded-count
+  characters and the total-vs-additional question from §5; bad checksums; `\x03` mid-packet;
+  `%` notifications; garbage before `$`; and the **ack-mode switch at the exact byte**.
+- **`state.rs` unit tests.** Table-driven: sequences of (direction, packet) → expected
+  `TargetState`. Include `O` output during a `c`, `F` requests, `vStopped` drains.
+- **Mux unit tests** against an in-process fake socket:
+    - FIFO routing with interleaved sources — a GDB `c` outstanding, two of our `m`s behind it,
+      replies arriving in order, each landing in the right place.
+    - Ack accounting in ack mode: our `+`s swallowed, GDB's forwarded, our replies acked by us.
+    - The send gate: nothing of ours goes out before the handshake settles, while a GDB packet is
+      queued, while an `F` is pending, or while `HaltedOnly` and running.
+    - `depth = 1` and `depth = 2` produce identical results, different timing.
+- **Verbatim-forwarding test.** Feed a recorded GDB↔server transcript through the mux with no
+  Agent consumers attached and assert the forwarded byte streams are **identical to the input in
+  both directions**. This is invariant 1 as a test, and it must be impossible for a later change to
+  break it silently.
+- **Forbidden-packet test.** Drive a full mock session with RTT-like traffic and assert on the
+  captured packet log that no execution-control, breakpoint or mode packet was ever emitted by us.
+- **Capture real traffic.** `set debug remote 1` in GDB produces a usable transcript; capture one
+  per server (OpenOCD, J-Link, pyOCD, ST-LINK, probe-rs, QEMU) and commit them as fixtures. They
+  pay for themselves the first time a server does something unexpected.
+- Run with **`npm run test:rust`**, not bare `cargo test` (AGENTS.md — the wrapper runs the
+  prettier pass, so a test run leaves no whitespace churn in generated TS).
+
+---
+
+## 11. Plan
+
+Phases 1–3 do not depend on the §8 decision. Each item is sized to be a reviewable commit.
+
+### Phase 1 — Codec and state (pure, no I/O)
+
+- [x] **1.** Create `packages/mdbg/src/gdb_rsp/`, registered in `lib.rs`. Removed the orphan
+      `proxy_helper/proxy_server/gdb_rsp.rs` — it had **no `mod` declaration anywhere**, so it had
+      never been compiled, which is why its camelCase field never tripped clippy. `packet.rs`,
+      `caps.rs` and `state.rs` are created by their own items below rather than as empty files.
+- [x] **2.** Settle the two protocol details from §5 against the GDB manual and `remote.c`: RLE
+      count semantics (total vs additional) and the `x` reply's leading marker. Record the answers
+      in this document. Cheap now, expensive later.
+- [x] **3.** `PacketCodec` in `frame.rs` with the `Frame { raw, payload, kind }` shape: framing,
+      checksum, unescape, RLE decode, `\x03` passthrough, `%` notifications, ack-mode switch,
+      resync on a mid-packet `$`. Plus `encode_packet` for Agent-originated packets (escapes, never
+      RLE — we are never the stub).
+- [x] **4.** 32 codec unit tests, including exhaustive single-split-point coverage and
+      byte-at-a-time feeding (both assert frames are identical to feeding the input whole).
+- [x] **5.** `RspCaps` + `qSupported` reply parser in `caps.rs`, with `ServerTier` (§7) and the
+      chunking budgets. Defaults come from GDB: 399 bytes (`remote_packet_size = 400 - 1`) when no
+      `PacketSize` is advertised, floor 20 (`MIN_MEMORY_PACKET_SIZE`).
+- [x] **6.** Builders and parsers in `packet.rs` for `m`/`M`/`x`/`X`/`?`/`qRcmd` and stop replies,
+      with hex helpers. Builders emit **payloads**, not framed packets, so the §4.5 choke point can
+      inspect one before it reaches the wire — and there is deliberately no builder for any
+      forbidden packet, so the restriction is partly structural.
+- [x] **7.** `StateTracker` in `state.rs` + table-driven tests, including the `O`/`F`-during-`c`
+      traps and `vCont?` (a capability query, not a resume).
+
+### Phase 2 — The mux
+
+- [ ] **8.** `RspMux` skeleton: owns the socket, reader + writer threads, send queue, pending FIFO.
+      `feed_from_gdb` enqueues and returns without blocking. Pure pass-through at this point — no
+      Agent packets yet — so the verbatim-forwarding test (item 12) can be written against it
+      first.
+- [ ] **9.** Ack accounting (§4.3), including the switch point and `-` retransmit with a fatal
+      threshold.
+- [ ] **10.** The send gate (§4.2) and the forbidden-packet choke point (§4.5), with the tests that
+      assert both. `depth` defaults to 1 and is refused above 1 outside no-ack mode (§4.2.1).
+- [ ] **11.** Consumer API: `attach`/`detach` in the shape of `serial/port.rs`, `read_memory` /
+      `write_memory` with `packet_size` chunking and `x`-vs-`m` selection, per-request timeouts.
+- [ ] **12.** Verbatim-forwarding test over recorded transcripts; mux routing/gating unit tests.
+
+### Phase 3 — Integration into `ProxyServer`
+
+- [ ] **13.** Retain `stream_id_str` on `PortInfoListner`/`PortInfo` (it is already on the wire in
+      `PortReserved`; the Agent throws it away today), and add `StreamKind { Control, Stdout,
+Stderr, GdbRsp { core }, Swo, Tcl, Telnet, Console, Other }` classified once at allocation.
+      The rule is `gdbPort` + optional digits — note `createPortName()`
+      (`packages/mcu-debug/src/adapter/servers/common.ts:650`) suffixes only when `procNum != 0`,
+      so core 0 is plain `gdbPort` and matching the literal `gdbPort1` would miss nearly every
+      session. Unit-test the classifier against every name in every server controller's
+      `portsNeeded`.
+      _This enum is also what [Stream-Flow-Control.md](./Stream-Flow-Control.md) needs for its own
+      throttling policy — one classification serves both._
+- [ ] **14.** Give the mux ownership of the server socket for `StreamKind::GdbRsp` streams,
+      replacing that stream's `read_and_forward` and the direct `pinfo.stream` write in
+      `message_loop`. One mux per core, created when the stream connects.
+- [ ] **15.** End-to-end pass-through validation: a real debug session against OpenOCD with the mux
+      in the path and **no consumers attached** must be indistinguishable from today — same
+      behaviour, no measurable added latency. This is the gate before any consumer work; if it
+      does not hold, nothing after it matters.
+- [ ] **16.** State/capability observations published to interested parties (`TargetState` changes,
+      `RspCaps`, GDB disconnect), with the per-core fan-in if a core has several GDB streams.
+- [ ] **17.** **Server compatibility matrix** — fill in the table in §7 ("The matrix to fill in")
+      and assign each server a tier. OpenOCD's column is already done, from reading `gdb_server.c`
+      (§4.2.1); the value here is the other five. Where a server ships source, read it rather than
+      probing it.
+
+### Phase 4 — Consumers _(blocked on §8)_
+
+- [ ] **18.** Decide and record how local (non-proxy) sessions reach the Agent. Preferred:
+      `hostConfig.type = "local"` for all sessions.
+- [ ] **19.** Expose the primitive to TypeScript: control requests/events for memory read/write and
+      state subscription, authored in Rust with `ts_rs` and exported in `ensure_ts_exports`
+      (AGENTS.md — never hand-write the generated TS).
+- [ ] **20.** Port RTT: move the control-block walk from `rtt-builtin.ts` onto the mux, on its own
+      thread, with the existing decoder pipeline unchanged. Keep the TS path behind a switch until
+      parity is measured. Server-side RTT stays available and unchanged.
+- [ ] **21.** Measure. RTT throughput and latency, Agent vs. live-GDB, in both topologies, plus
+      GDB's own step/continue latency with a consumer active. The justification for this work is a
+      number; produce it.
+- [ ] **22.** DWT PC sampling: poll `DWT_PCSR`, aggregate, stream results. Symbolication via
+      `da_helper` is a separate design.
+- [ ] **23.** Stack probing and ETB/ETF drain — separate designs, same primitive. Stack probing has
+      a route decision first (§1, "The split is per feature"): sample from Rust on the mux for rate,
+      or let GDB sample and backtrace after a halt. Only the Rust route needs the `g`/`p` decision
+      from §4.5, so settle the route before spending anything on that.
+
+---
+
+## 12. Open questions
+
+1. **§8 — local topology.** Blocking for Phase 4. Confirm `hostConfig.type = "local"` for all
+   sessions is the intended route.
+2. **Do the _other_ servers answer state-free requests while GDB has a `c` outstanding on the same
+   connection?** Was the single biggest risk; **answered for OpenOCD from its source** (§4.2.1 — no
+   halt gate on the memory-read path). Still open for J-Link, pyOCD, ST-LINK, probe-rs and QEMU:
+   Phase 3 item 17. A server that says no drops to `HaltedOnly`; if several do, the companion design
+   in §9 returns as a contingency for exactly those.
+3. **Does `depth = 2` pipelining upset any stub?** Largely answered and largely moot — see §4.2.1.
+   The servers are single-threaded and strictly serial, so depth 2 removes only loopback latency,
+   not SWD time; and in ack mode it collides with the server's post-reply ack read. The rule
+   (`depth > 1` only in no-ack mode, default 1) follows from OpenOCD's code. What remains is
+   whether any other server is _less_ tolerant than OpenOCD, which recovers with a warning.
+4. **§4.7 — should the mux eventually carry multiple GDB clients on one server socket?** The case
+   got stronger in review: it would remove `duplicateStream`'s extra connections, retire
+   `CDLiveWatchSetup` and its per-server equivalents, make live watch work on strictly
+   single-connection servers, and let the mux hand the live GDB the run/stop state the server will
+   not send a second connection. The cost is virtualising per-client `qSupported`, ack mode, `Hg`
+   and `qXfer`, plus an ownership policy for `Z`/`z` — which is per-core state two GDBs would both
+   think they own, and the genuinely hard part. Out of scope here, but worth knowing whether it is
+   the intended end state, because it changes how much the Phase-2 FIFO should generalise.
+5. **`g`/`p` register reads** (§4.5) — halted-only, and formally `Hg`-dependent on a socket where
+   we may not set `Hg`. Needed for stack probing. Decide at Phase 4 item 23.
+6. **Reads while the target runs are not atomic with respect to the target.** RTT copes by design
+   (the ring protocol assumes it). A multi-word structure read or a stack probe may tear. The mux
+   offers no atomicity guarantee and must not pretend to; each consumer owns the problem — see §4.8,
+   which is where that obligation is written down.
+7. **Poll-rate arbitration** — mostly self-answering. A consumer that asks for a very high drain
+   rate simply gets whatever the connection and the probe allow; the request rate is bounded by the
+   link, not by a policy we have to invent. The mux's send queue provides the backpressure. What is
+   left is narrower: whether a greedy consumer can measurably degrade **GDB's** step/continue
+   latency, which it could not when the load sat on a separate connection. Phase 4 item 21 measures
+   it; if it is a problem, the fix is a per-consumer rate cap, not an arbitrator.
+8. **Multi-core: two different server families, and we support both or a mix.**
+    - **OpenOCD family** — one server process serves every core, each on its own gdb port. All cores
+      must be prepared when the process starts. But **one GDB connects to one core**, so a VS Code
+      session debugs a single core; additional cores are additional sessions via
+      `chainedConfigurations`, which share the parent's server process and its ports
+      (`getTCPPorts(useParent)` takes them from `args.pvtParent.pvtPorts`).
+    - **J-Link family** — a 1:1 server-instance-to-core relationship, so every session looks like a
+      single-core session with no sharing between cores.
+
+    Consequence for the mux, and the actual open item: because chained children reuse the parent's
+    ports, **every core's RSP traffic flows through the parent session's `ProxyServer`**. So one
+    `ProxyServer` can own several muxes, and a mux's lifetime is tied to the _parent_ session rather
+    than to the session debugging that core. Confirm that lifetime is handled correctly when a child
+    session ends before its parent, and when the parent ends first. Nothing here needs speculative
+    multi-core machinery; the per-core mux granularity already matches both families, and
+    `launch.json` plus our own config tell us which one a given session is.

@@ -16,6 +16,7 @@
 pub mod cockpit;
 pub mod common;
 pub mod da_helper;
+pub mod gdb_rsp;
 pub mod proxy_helper;
 pub mod serial;
 
