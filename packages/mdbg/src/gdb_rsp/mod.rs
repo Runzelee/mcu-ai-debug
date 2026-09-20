@@ -35,18 +35,22 @@
 //! 6. `consumer` — the `read_memory`/`write_memory` API its clients use.
 
 pub mod caps;
+pub mod channel;
 pub mod chunk;
 pub mod frame;
 pub mod mux;
 pub mod packet;
 pub mod state;
+pub mod trace;
 
 pub use caps::{MemoryReadKind, MemoryWriteKind, RspCaps, ServerTier};
+pub use channel::{GdbSink, RspChannel};
 pub use chunk::{plan_read, plan_write, Chunk, ReadAssembler, WriteAssembler};
 pub use frame::{AckMode, Frame, FrameKind, PacketCodec};
 pub use mux::{Action, ConsumerId, MuxCore, RspSource};
 pub use packet::StopReply;
 pub use state::{Direction, StateTracker, TargetState};
+pub use trace::{Party, RspTrace, TraceEvent, TraceLevel};
 
 /// Anything that can go wrong on an RSP channel.
 ///

@@ -1,10 +1,11 @@
 # GDB RSP Multiplexer in the Probe Agent — Design & Plan
 
-**Status:** Design agreed. **Phase 1 complete; Phase 2 complete except the threaded shell** — the
-multiplexer core (`mux.rs`) and the chunking layer (`chunk.rs`) are written and tested sans-IO:
-routing, ack accounting, the send gate, the forbidden-packet choke point, request splitting and
-short-reply reassembly. 136 tests in `packages/mdbg/src/gdb_rsp/`. Still to do: the threaded shell
-that owns the socket, then Phase 3. Revised 2026-09-19.
+**Status:** Design agreed. **Phase 1 complete; Phase 2 complete bar item 11b** — `mux.rs` (core,
+sans-IO), `chunk.rs` (splitting and reassembly, sans-IO) and `channel.rs` (the threaded shell that
+owns the byte streams) are written and tested: 146 tests in `packages/mdbg/src/gdb_rsp/`.
+**Nothing is wired in yet** — the module has no callers outside its own `pub mod` line, so runtime
+behaviour is unchanged. Next: Phase 3 items 13–14 to wire it in, which is what unlocks the
+**item 15 real-board pass-through test**. Item 11b is not on that path. Revised 2026-09-19.
 
 **Goal:** make the Probe Agent (`mdbg proxy`) a **multiplexer on the GDB Remote Serial Protocol
 connection to the gdb-server**. GDB becomes one client on that connection; the Agent's own
@@ -608,6 +609,72 @@ RTT and profiling run while the target is _running_; GDB's heavy traffic — sta
 happens while it is _halted_. The two loads barely contend for the link. What needs protecting is GDB's
 interactive latency, which is paid per packet per hop, which is the table above.
 
+### 4.7.3 Packet tracing
+
+**`trace.rs`, to its own file, enabled from `debugFlags`.**
+
+GDB's `set debug remote` and OpenOCD's `gdb_log_*_packet()` are **endpoint** traces: two directions,
+each side seeing only its own half. The mux is a **relay with four parties**, and the two that matter
+most are invisible to both of those tools:
+
+| Party     | Meaning                                                 |
+| --------- | ------------------------------------------------------- |
+| `GDB>SRV` | forwarded from GDB — GDB's own trace shows this too     |
+| `SRV>GDB` | forwarded to GDB — likewise                             |
+| `AGT>SRV` | **injected by the Agent** — no other tool can show this |
+| `SRV>AGT` | **consumed by the Agent**, never forwarded — likewise   |
+
+Every token is exactly seven ASCII characters, so columns align and `grep AGT` isolates the Agent's
+traffic exactly. The interleaving of `AGT>SRV` against an outstanding `GDB>SRV` continue is the thing
+that cannot be seen any other way, and it is where §4.1's subtleties live.
+
+```text
+# mdbg RSP trace  stream=gdbPort  level=All
+      0.076  GDB>SRV  $qSupported:multiprocess+;swbreak+#f7
+      3.891  SRV>GDB  $PacketSize=4000;QStartNoAckMode+;vContSupported+#02
+     11.498  GDB>SRV  $vCont;c#a8
+     15.261  AGT>SRV  $m20000000,4#4f   c1/s42
+     19.035  SRV>AGT  $deadbeef#3c   c1/s42 rtt=0.412ms
+     22.818  SRV>GDB  $0* #b0   (rle/esc)
+     26.589  AGT>SRV  $X20000010,3:\x00\x01\xff#00   c1/s43
+```
+
+Decisions worth keeping:
+
+- **Its own file, not the shared log.** Volume; timing value diluted by prose; you want to diff two
+  runs. Decisively: routing trace lines through the shared logger puts that logger's locking and
+  formatting in the RSP hot path.
+- **Never adds latency; lossy under pressure instead.** A bounded queue drained by a dedicated
+  writer thread. When full, records are **dropped and counted**, and the gap is written into the
+  file rather than passing as silence. Same principle as
+  [Stream-Flow-Control.md](./Stream-Flow-Control.md) — a trace that slows what it measures produces
+  numbers nobody can trust. Timestamps are taken at record time, not write time, because under load
+  the queue delay is exactly the interval being investigated.
+- **Raw bytes, as on the wire**, so lines can be compared against GDB's and OpenOCD's own traces.
+  Non-printables as `\xNN`, truncated at 512 bytes with the full length noted, and an RLE or escaped
+  body flagged `(rle/esc)` because raw would otherwise look corrupt.
+- **Round-trip time on our replies**, which makes it a profiling tool and not just a dump.
+- **Three levels** — `off` / `packets` / `all`. `all` includes acks: noisy, and exactly what an
+  ack-accounting problem needs.
+- **The core emits, the shell writes.** `MuxCore` produces `Action::Trace`, `channel.rs` records it.
+  That keeps the core sans-IO while putting the decision where the knowledge is — **provenance is
+  only knowable in the core**: by the time the shell sees `ToServer` bytes it cannot tell GDB's
+  forwarded packet from ours, and the replies we consume never become a `ToGdb` at all. (An earlier
+  sketch proposed adding a `source` field to `Action::ToServer`; an explicit `Trace` action turned
+  out cleaner and left the existing tests untouched.)
+- **Level is switchable on a live channel**, so a trace can be turned on while a session is already
+  misbehaving rather than only on the next run.
+
+**Enablement is `debugFlags.rspTrace` in launch.json**, carried to the Agent over the control
+channel. `debugFlags` already holds `gdbTraces`, `liveGdbTraces` and friends, so this is where users
+already look, and a control request can toggle a _running_ singleton Agent — which an environment
+variable cannot. No `MDBG_RSP_TRACE`: the `MDBG_PROXY_TOKEN` precedent exists to keep a _secret_ out
+of a `launch.json` under source control, and a trace level is not a secret. Server-side defaults, if
+ever wanted, are command-line flags.
+
+> **Editing note:** `debugFlags` is declared in `packages/mcu-debug/manifest-src/definitions.js`.
+> `package.json` is **generated** from it — editing the manifest directly is lost on the next build.
+
 ### 4.8 How mux clients must behave
 
 The mux enforces what it can (§4.5), but most of the discipline has to live in the clients — RTT,
@@ -1055,8 +1122,18 @@ Phases 1–3 do not depend on the §8 decision. Each item is sized to be a revie
 
 - [x] **8.** `MuxCore` in `mux.rs`: send queue, pending FIFO, routing, frame-boundary forwarding.
       **Built sans-IO** — no socket, no threads, no clock it is not handed — so every §4 rule is
-      testable without a gdb-server or a sleep. The threaded shell that owns the socket is a
-      separate, thin layer with no protocol logic in it (still to write).
+      testable without a gdb-server or a sleep.
+- [x] **8b.** `channel.rs` — the threaded shell: reader thread, writer thread (which doubles as the
+      core's clock), one-shot reply delivery, idempotent teardown that fails everything outstanding.
+      `feed_from_gdb` is guaranteed non-blocking, with a test that hammers it while nothing drains
+      the far side. The GDB side is a `GdbSink` trait and the server side a plain `Read`+`Write`
+      pair, so `gdb_rsp` still names nothing from `proxy_helper` (D6) — and a serial-port server
+      side would need no change to this file (§7, BMP).
+- [x] **8c.** `trace.rs` — four-party packet tracing to its own file (§4.7.3): bounded queue,
+      dedicated writer, drop-and-count under pressure, runtime-switchable level. The core emits
+      `Action::Trace`; the shell writes it. **Still to do:** the `debugFlags.rspTrace` →
+      control-request plumbing, which lands with item 14 — until the mux is wired in there is no
+      channel for a control request to address.
 - [x] **9.** Ack accounting (§4.3): the no-ack switch at the exact `OK` that answers
       `QStartNoAckMode`, `-` retransmit with a 3-strike limit, our acks swallowed and GDB's
       forwarded, and unattributable acks forwarded to GDB.

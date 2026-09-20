@@ -166,6 +166,14 @@ impl PacketCodec {
     pub fn next_frame(&mut self) -> Option<Frame> {
         let &first = self.buf.first()?;
         match first {
+            // Acks are decoded in **either** mode, deliberately. Tightening this to
+            // reject them in no-ack mode would look like a correctness improvement
+            // and would break a real sequence: when GDB's `QStartNoAckMode` is
+            // answered `OK`, GDB acks that `OK` — it was still in ack mode when it
+            // sent the request — and only then switches. So exactly one `+` arrives
+            // after no-ack has engaged. OpenOCD handles the endpoint side of this
+            // with a tri-state `noack_mode` (0, 1 = expect one stray, 2 = warn);
+            // we are a relay, so we simply decode it and let it through.
             b'+' => Some(self.take_single(FrameKind::Ack)),
             b'-' => Some(self.take_single(FrameKind::Nack)),
             INTERRUPT => Some(self.take_single(FrameKind::Interrupt)),

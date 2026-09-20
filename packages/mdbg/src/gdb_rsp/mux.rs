@@ -33,6 +33,7 @@ use super::caps::{RspCaps, ServerTier};
 use super::frame::{encode_packet, AckMode, Frame, FrameKind, PacketCodec};
 use super::packet::parse_stop_reply;
 use super::state::{Direction, StateTracker, TargetState};
+use super::trace::{Party, TraceEvent, TraceLevel};
 use super::RspError;
 
 /// Identifies an Agent-side consumer (RTT, profiler, trace drain).
@@ -81,6 +82,14 @@ pub enum Action {
     /// No-ack mode came into force. Emitted at the exact packet where it happens,
     /// because that is the byte boundary a codec must switch on.
     NoAckEngaged,
+    /// One thing that happened on the wire, for the trace file.
+    ///
+    /// Emitted only when a trace level is set, so it costs nothing when off. It
+    /// exists because **provenance is only knowable here**: by the time the shell
+    /// sees `ToServer` bytes it cannot tell GDB's forwarded packet from one of ours,
+    /// and the replies we consume never become a `ToGdb` at all. Those two are
+    /// precisely the parties no other tool can show (`trace.rs`).
+    Trace(TraceEvent),
     /// The channel cannot be trusted any further.
     Fatal(&'static str),
 }
@@ -120,6 +129,9 @@ struct Pending {
     /// How many times we have resent it.
     retransmits: u8,
     deadline: Option<Instant>,
+    /// When it went out, for the trace's round-trip figure. `None` for GDB's
+    /// packets, whose latency GDB measures for itself.
+    sent_at: Option<Instant>,
 }
 
 impl Pending {
@@ -161,6 +173,7 @@ pub struct MuxCore {
     /// may go out in between.
     file_io_outstanding: bool,
     closed: bool,
+    trace_level: TraceLevel,
 }
 
 impl MuxCore {
@@ -179,7 +192,51 @@ impl MuxCore {
             no_ack_requested: false,
             file_io_outstanding: false,
             closed: false,
+            trace_level: TraceLevel::Off,
         }
+    }
+
+    /// Set how much to emit as [`Action::Trace`]. `Off` (the default) emits none.
+    pub fn set_trace_level(&mut self, level: TraceLevel) {
+        self.trace_level = level;
+    }
+
+    pub fn trace_level(&self) -> TraceLevel {
+        self.trace_level
+    }
+
+    /// Insert a `SRV>GDB` record before each action that forwards to GDB.
+    ///
+    /// Done as a pass over the finished list rather than at each of the nine
+    /// `ToGdb` sites: one place to get right, and impossible to forget when a new
+    /// forwarding path is added later.
+    fn trace_to_gdb(&self, actions: Vec<Action>) -> Vec<Action> {
+        if !self.trace_level.is_on() {
+            return actions;
+        }
+        let mut out = Vec::with_capacity(actions.len() * 2);
+        for action in actions {
+            if let Action::ToGdb(bytes) = &action {
+                let is_ack = bytes.len() == 1 && matches!(bytes[0], b'+' | b'-');
+                if !is_ack || self.trace_level.includes_acks() {
+                    out.extend(self.trace(Party::ServerToGdb, bytes, None));
+                }
+            }
+            out.push(action);
+        }
+        out
+    }
+
+    /// Build a trace action when tracing is on, so callers stay one-liners and
+    /// nothing is allocated when it is off.
+    fn trace(&self, party: Party, raw: &[u8], detail: Option<String>) -> Option<Action> {
+        if !self.trace_level.is_on() {
+            return None;
+        }
+        Some(Action::Trace(match detail {
+            Some(d) => TraceEvent::with_detail(party, raw.to_vec(), d),
+            None => TraceEvent::new(party, raw.to_vec()),
+        }))
     }
 
     /// Raise the pipelining depth.
@@ -270,6 +327,7 @@ impl MuxCore {
                             // GDB manages its own timeouts, and a `c` legitimately
                             // has no deadline at all.
                             deadline: None,
+                            sent_at: None,
                         });
                     }
                 }
@@ -282,6 +340,13 @@ impl MuxCore {
                     // creates no pending entry.
                 }
                 _ => {}
+            }
+            // Acks are the bulk of the traffic by count and say nothing when
+            // healthy, so they only appear at `All` — which is the level to use for
+            // an ack-accounting problem.
+            let is_ack = matches!(frame.kind, FrameKind::Ack | FrameKind::Nack);
+            if !is_ack || self.trace_level.includes_acks() {
+                actions.extend(self.trace(Party::GdbToServer, &frame.raw, None));
             }
             actions.push(Action::ToServer(frame.raw));
         }
@@ -331,7 +396,7 @@ impl MuxCore {
             }
         }
         actions.extend(self.pump());
-        actions
+        self.trace_to_gdb(actions)
     }
 
     /// A `+`/`-` from the server. Untagged, so it belongs to the earliest packet
@@ -440,6 +505,15 @@ impl MuxCore {
                 self.file_io_outstanding = false;
             }
             RspSource::Agent(id) => {
+                // The direction no other tool can show: a reply that never reaches
+                // GDB at all. Round-trip is measured here because this is the only
+                // place both ends of it are known. `Instant::now()` is the one clock
+                // read in the core, and only when tracing is on.
+                let detail = match p.sent_at {
+                    Some(at) => format!("c{id}/s{} rtt={:.3}ms", p.seq, at.elapsed().as_secs_f64() * 1000.0),
+                    None => format!("c{id}/s{}", p.seq),
+                };
+                actions.extend(self.trace(Party::ServerToAgent, &frame.raw, Some(detail)));
                 // Ours. Never reaches GDB. In ack mode the server is waiting for
                 // an ack for this reply, and GDB will not send one because GDB
                 // never saw it — so we must.
@@ -541,7 +615,9 @@ impl MuxCore {
                 awaiting_ack: self.ack_mode() == AckMode::Acked,
                 retransmits: 0,
                 deadline: q.timeout.map(|t| now + t),
+                sent_at: Some(now),
             });
+            actions.extend(self.trace(Party::AgentToServer, &framed, Some(format!("c{}/s{}", q.id, q.seq))));
             actions.push(Action::ToServer(framed));
         }
         actions
@@ -638,6 +714,7 @@ impl MuxCore {
                 awaiting_ack: false,
                 retransmits: 0,
                 deadline: None,
+                sent_at: None,
             }))
         {
             if let RspSource::Agent(id) = p.source {
@@ -1063,6 +1140,47 @@ mod tests {
     }
 
     #[test]
+    fn the_one_stray_ack_after_no_ack_engages_is_forwarded_and_desynchronises_nothing() {
+        // The real sequence, which a hand-written handshake is apt to omit:
+        //   GDB  -> $QStartNoAckMode
+        //   srv  -> +            (still in ack mode)
+        //   srv  -> $OK          (server switches to no-ack here)
+        //   GDB  -> +            (acks that OK -- GDB switches only AFTER this)
+        // So exactly one `+` arrives once we already consider the link no-ack. It
+        // must pass through to the server, which ignores it (OpenOCD logs it once at
+        // debug and warns on any further one), and it must not be mistaken for an
+        // ack belonging to some later packet.
+        let mut m = MuxCore::new(ServerTier::Full);
+        m.on_gdb_bytes(&p(b"qSupported:"));
+        m.on_server_bytes(&p(Q_SUPPORTED_REPLY));
+        m.on_gdb_bytes(b"+");
+        m.on_gdb_bytes(&p(b"QStartNoAckMode"));
+        m.on_server_bytes(b"+");
+        let acts = m.on_server_bytes(&p(b"OK"));
+        assert!(acts.contains(&Action::NoAckEngaged));
+        assert_eq!(m.ack_mode(), AckMode::NoAck);
+
+        // GDB's trailing ack for the OK. Forwarded verbatim, creates no pending entry.
+        let before = m.in_flight();
+        let acts = m.on_gdb_bytes(b"+");
+        assert_eq!(to_server(&acts), vec![b"+".to_vec()], "the stray ack was not forwarded");
+        assert_eq!(m.in_flight(), before, "the stray ack created a pending entry");
+
+        // And the link still works: the next exchange must not be off by one.
+        m.on_gdb_bytes(&p(b"?"));
+        let acts = m.on_server_bytes(&p(b"T05"));
+        assert_eq!(to_gdb(&acts), vec![p(b"T05")]);
+        assert_eq!(m.state(), TargetState::Stopped);
+
+        // Including one of ours, which is what would break if the stray ack had been
+        // charged against a later packet.
+        m.submit(1, packet::mem_read(0, 4, MemoryReadKind::Hex), None).unwrap();
+        assert_eq!(to_server(&m.pump()), vec![p(b"m0,4")]);
+        let acts = m.on_server_bytes(&p(b"deadbeef"));
+        assert_eq!(completions(&acts), vec![(1, Ok(b"deadbeef".to_vec()))]);
+    }
+
+    #[test]
     fn in_no_ack_mode_we_neither_send_nor_expect_acks() {
         let mut m = handshaken(ServerTier::Full);
         assert_eq!(m.ack_mode(), AckMode::NoAck);
@@ -1419,6 +1537,118 @@ mod tests {
         // Our reply still completes.
         let acts = m.on_server_bytes(&p(b"aabbccdd"));
         assert_eq!(completions(&acts), vec![(1, Ok(b"aabbccdd".to_vec()))]);
+    }
+
+    // ── Tracing (§ trace.rs) ──────────────────────────────────────────────────
+
+    fn traced(actions: &[Action]) -> Vec<(Party, String)> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Trace(e) => Some((e.party, String::from_utf8_lossy(&e.raw).to_string())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tracing_off_emits_nothing_at_all() {
+        // Must cost nothing when off, including no allocation.
+        let mut m = handshaken(ServerTier::Full);
+        assert_eq!(m.trace_level(), TraceLevel::Off);
+        let acts = m.on_gdb_bytes(&p(b"m0,4"));
+        assert!(traced(&acts).is_empty());
+        m.submit(1, packet::mem_read(0, 4, MemoryReadKind::Hex), None).unwrap();
+        assert!(traced(&m.pump()).is_empty());
+    }
+
+    #[test]
+    fn the_trace_shows_all_four_parties_including_the_two_no_other_tool_can() {
+        // The claim trace.rs is built on. GDB continues; we read memory while the
+        // target runs; our request and its reply are invisible to GDB's own
+        // `set debug remote` and to OpenOCD's log, and must appear here.
+        let mut m = handshaken(ServerTier::Full);
+        m.set_trace_level(TraceLevel::Packets);
+
+        let acts = m.on_gdb_bytes(&p(b"vCont;c"));
+        assert_eq!(traced(&acts), vec![(Party::GdbToServer, "$vCont;c#a8".to_string())]);
+
+        m.submit(7, packet::mem_read(0x2000_0000, 4, MemoryReadKind::Hex), None)
+            .unwrap();
+        let acts = m.pump();
+        let t = traced(&acts);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].0, Party::AgentToServer);
+        assert_eq!(t[0].1, "$m20000000,4#4f");
+        // Consumer and seq are on the record, so a grep can follow one request.
+        let detail = acts.iter().find_map(|a| match a {
+            Action::Trace(e) => e.detail.clone(),
+            _ => None,
+        });
+        // Consumer id asserted exactly; the seq is internal bookkeeping whose value
+        // depends on how many packets the handshake happened to send.
+        let detail = detail.unwrap();
+        assert!(detail.starts_with("c7/s"), "{detail}");
+        let seq = detail.strip_prefix("c7/s").unwrap().to_string();
+
+        // Our reply: SRV>AGT, with a round-trip figure, and never forwarded.
+        let acts = m.on_server_bytes(&p(b"deadbeef"));
+        let t = traced(&acts);
+        assert_eq!(t.len(), 1, "expected exactly one record, got {t:?}");
+        assert_eq!(t[0].0, Party::ServerToAgent);
+        let detail = acts
+            .iter()
+            .find_map(|a| match a {
+                Action::Trace(e) => e.detail.clone(),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            detail.starts_with(&format!("c7/s{seq} rtt=")),
+            "reply should name the same request and carry a round-trip figure: {detail}"
+        );
+
+        // And GDB's own stop reply, much later: SRV>GDB.
+        let acts = m.on_server_bytes(&p(b"T05"));
+        assert_eq!(traced(&acts), vec![(Party::ServerToGdb, "$T05#b9".to_string())]);
+    }
+
+    #[test]
+    fn acks_are_traced_only_at_the_all_level() {
+        // Acks dominate by count and say nothing when healthy -- but they are the
+        // whole story for an ack-accounting bug, so `All` must include them.
+        let mut m = MuxCore::new(ServerTier::Full);
+        m.set_trace_level(TraceLevel::Packets);
+        let acts = m.on_gdb_bytes(b"+");
+        assert!(traced(&acts).is_empty(), "an ack was traced at the Packets level");
+
+        m.set_trace_level(TraceLevel::All);
+        let acts = m.on_gdb_bytes(b"+");
+        assert_eq!(traced(&acts), vec![(Party::GdbToServer, "+".to_string())]);
+    }
+
+    #[test]
+    fn a_forwarded_server_ack_is_traced_as_server_to_gdb() {
+        let mut m = MuxCore::new(ServerTier::Full);
+        m.set_trace_level(TraceLevel::All);
+        m.on_gdb_bytes(&p(b"qSupported:"));
+        let acts = m.on_server_bytes(b"+");
+        assert!(
+            traced(&acts).contains(&(Party::ServerToGdb, "+".to_string())),
+            "{:?}",
+            traced(&acts)
+        );
+    }
+
+    #[test]
+    fn a_trace_record_precedes_the_action_it_describes() {
+        // So the file reads in wire order rather than lagging by one.
+        let mut m = handshaken(ServerTier::Full);
+        m.set_trace_level(TraceLevel::Packets);
+        let acts = m.on_gdb_bytes(&p(b"m0,4"));
+        let trace_at = acts.iter().position(|a| matches!(a, Action::Trace(_))).unwrap();
+        let send_at = acts.iter().position(|a| matches!(a, Action::ToServer(_))).unwrap();
+        assert!(trace_at < send_at, "trace came after the send: {acts:?}");
     }
 
     #[test]
