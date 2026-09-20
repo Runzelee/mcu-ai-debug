@@ -14,10 +14,12 @@
 
 //! Target run-state model, driven entirely by observed traffic.
 //!
-//! This is the state the Agent gets **for free** by owning the socket. The
-//! gdb-server reports run/stop transitions only to the first connection
-//! (`docs-internal/gdb-rsp.md` §2), and under the multiplexer that connection is
-//! ours — so this is the server's own view, not a reconstruction.
+//! This is the state the Agent gets **for free** by owning the socket. A gdb-server
+//! reports a run/stop transition to the connection that **issued the resume** — not
+//! to every connection, and not merely to the first one (`docs-internal/gdb-rsp.md`
+//! §2 has the mechanism, read out of OpenOCD's source). Under the multiplexer the
+//! resuming connection is GDB's, and we are on it, so this is the server's own view
+//! rather than a reconstruction.
 //!
 //! The state is a property of the **core**, not of a connection (§3.10): one core
 //! is running or halted, and every consumer and every GDB client attached to that

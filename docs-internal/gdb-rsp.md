@@ -1,6 +1,8 @@
 # GDB RSP Multiplexer in the Probe Agent — Design & Plan
 
-**Status:** Design agreed. **Phase 1 complete; Phase 2 complete bar item 11b** — `mux.rs` (core,
+**Status:** Design agreed, and **its central premise is now confirmed on hardware** — OpenOCD answers
+a memory read in 0.5 ms on a connection that itself has a `c` outstanding (§7, `rsp-probe`). OpenOCD's
+tier is `Full`. **Phase 1 complete; Phase 2 complete bar item 11b** — `mux.rs` (core,
 sans-IO), `chunk.rs` (splitting and reassembly, sans-IO) and `channel.rs` (the threaded shell that
 owns the byte streams) are written and tested: 146 tests in `packages/mdbg/src/gdb_rsp/`.
 **Nothing is wired in yet** — the module has no callers outside its own `pub mod` line, so runtime
@@ -121,35 +123,136 @@ no halt check at all. See §4.2.1, which reads the relevant parts of `gdb_server
 what pipelining can and cannot buy. For the other servers it stays a Phase-3 matrix item (§11
 item 17), and the outcome is a per-server-type capability tier (§7), not a yes/no.
 
-### The connections to a gdb port are not equals — and that argues for the mux
+### A connection is told about the resume _it_ issued — not about anyone else's
 
-Two facts we know from having built live watch, both of which a second-connection design has to
-fight and the mux gets for free:
+This was initially recorded the wrong way round, and the correction matters because the wrong
+version made the design look more fragile than it is. The earlier claim was "only the first
+connection is told what the target is doing." **That is not the mechanism.** OpenOCD's source says
+so plainly:
 
-1. **Connection slots are rationed, per core, with a default of 1.** OpenOCD's
-   `-gdb-max-connections` is a **per-target** property whose default is 1 (vendor-defined in the
-   general case). Live watch only works because `CDLiveWatchSetup` in
-   `packages/mcu-debug/support/openocd-helpers.tcl` walks `[target names]` and increments the limit
-   on each one. That is a Tcl helper the user's config must load before `init` — a real setup
-   burden, and one that has no analogue on other servers.
-2. **Only the first connection is told what the target is doing.** Run/stop replies go to the
-   first connection; the second gets silence. This is why `LiveWatchMonitor` subscribes to the
-   **main** session's running/stopped events instead of its own GDB's — see the comment at
-   `live-watch-monitor.ts:139`, which attributes it to non-stop mode. The likelier explanation is
-   this asymmetry: the server never sent the second connection a stop reply at all. Educated guess,
-   but it fits the observed behaviour better than the non-stop story does.
+| Step                                                                                           | Where                                                                  |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| The target-event callback is registered **per connection**                                     | `gdb_new_connection` → `target_register_event_callback(…, connection)` |
+| The handler filters by **target only**, then calls `gdb_frontend_halted` for _each_ connection | `gdb_target_callback_event_handler`                                    |
+| …which sends the stop reply only `if (gdb_connection->frontend_state == TARGET_RUNNING)`       | `gdb_frontend_halted` — that connection's **own** state                |
+| `frontend_state = TARGET_RUNNING` is set only in **that connection's** resume/step paths       | `gdb_server.c` resume handling                                         |
+
+So the rule is **behavioural, not positional**: a connection receives the stop reply for a resume it
+issued itself. Nothing discriminates by connection order.
+
+**That fully explains what live watch sees.** The live GDB is contractually forbidden to resume —
+precisely OpenOCD's documented contract for an extra client ("must promise not to issue pause,
+continue or step") — so its `frontend_state` never becomes `TARGET_RUNNING` and it is never sent a
+stop reply. The comment at `live-watch-monitor.ts:139` attributes this to non-stop mode; that is
+wrong, and so was the "first connection" correction that replaced it. The cause is simply that the
+live GDB never resumes.
+
+**Why this is better news.** "The first connection" would be a property we neither control nor can
+check. "The connection that issued the resume" is one we know exactly: it is the user's GDB, by
+definition, because it is the only thing driving execution. The mux sits there (item 14) and
+therefore sees every transition — not by luck of ordering, but structurally.
+
+### Evidence from real sessions (PSoC 6 / KitProg3, OpenOCD)
+
+Two captures with the main GDB and the live-watch GDB both attached. OpenOCD tags each connection
+`{1}` (main) and `{2}` (live watch) in its debug log, which settles several cells directly. The
+sessions had **different shapes**, so they prove different things — read them separately rather than
+side by side.
+
+**Session A — target mostly running.** Several continue/pause cycles, no breakpoints.
+
+| Observation                                                       | Count  | Establishes                                                                                                                         |
+| ----------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| **conn2 memory reads answered while conn1 had a `c` outstanding** | **66** | **OpenOCD serves `m` while the target runs.** Previously only inferred from the absence of a halt gate in `gdb_read_memory_packet`. |
+| conn2 memory reads answered while halted                          | 10     | baseline                                                                                                                            |
+| Async stop replies → conn2                                        | **0**  | conn2 is never told about a resume it did not issue                                                                                 |
+| Async stop replies → conn1                                        | 8      | `6×T02`, `2×T05` — both `T05`s were single-steps                                                                                    |
+
+**Session B — breakpoints actually hit.** Breakpoints set from the main GDB in the normal flow, hit
+repeatedly. This is the **autonomous halt** case: the core halts itself on an FPB comparator match,
+detected by OpenOCD's background poll with no requesting connection in scope.
+
+| Observation                              | Count  | Establishes                                                                                                                  |
+| ---------------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `BREAKPOINT` debug reasons               | **4**  | real autonomous halts, not host-requested                                                                                    |
+| `Z1,` / `z1,` on conn1                   | 10/10  | hardware breakpoints, set by the main GDB                                                                                    |
+| Breakpoint stop replies → conn1          | **4**  | all of them                                                                                                                  |
+| Breakpoint stop replies → conn2          | **0**  | **an autonomous halt routes exactly like a requested one**                                                                   |
+| conn1 async stop replies, total          | **11** | = 4 BREAKPOINT + 3 DBGRQ + 4 SINGLESTEP — the arithmetic closes exactly                                                      |
+| conn2 reads answered while conn1 running | 0      | not a contradiction of session A: with breakpoints firing the target was mostly halted, so conn2's polls landed while halted |
+
+In both sessions conn2's only stop-shaped packet was the **synchronous answer to its own `?`** at
+connect, logged via `gdb_last_signal()` rather than the async `gdb_frontend_halted` path. conn2 is not
+deaf — in session A it exchanged 128 requests and 123 replies including 76 memory reads. It never
+receives anything **unsolicited**.
+
+**Why the mechanism is uniform, in one sentence:** the server never says "your breakpoint", it says
+_stopped, SIGTRAP_. GDB compares the PC against its own breakpoint table to decide whether it owns
+that address, and if it does not it still has to handle the stop. So at the RSP level a breakpoint hit
+is just a stop reply like any other, and there is no special path because there is nothing special to
+say.
+
+**What is established, and how:**
+
+| Claim                                                         | Source reading | Hardware            |
+| ------------------------------------------------------------- | -------------- | ------------------- |
+| No positional discrimination anywhere in the path             | ✅             | —                   |
+| The async gate is that connection's own `frontend_state`      | ✅             | consistent          |
+| OpenOCD answers `m` while the target runs                     | ✅             | ✅ **66 reads** (A) |
+| A connection is not told about resumes it did not issue       | —              | ✅ **0 of 8** (A)   |
+| **An autonomous halt routes the same way as a requested one** | ✅             | ✅ **0 of 4** (B)   |
+
+### Both remaining cells closed by `rsp-probe` on hardware
+
+Run against the live OpenOCD (`mdbg rsp-probe --port 2009 -v`). The two questions no GDB session can
+reach are now answered, and they are the two the design actually depended on:
+
+| Row                                                          | Result                                 |
+| ------------------------------------------------------------ | -------------------------------------- |
+| **`m` answered while a `c` is outstanding, same connection** | **YES — replied in 0.5 ms**            |
+| **A resume issued on conn2, answered on conn2**              | **YES — `T02thread:1;`**               |
+| `QStartNoAckMode` honoured                                   | yes                                    |
+| `depth = 2` in no-ack mode                                   | yes — both replies arrived             |
+| Second connection accepted                                   | yes                                    |
+| conn2 told about conn1's resume                              | no — expected under either explanation |
+
+**The first row is the premise of the whole design, now measured rather than reasoned about.** 0.5 ms
+is no penalty at all; the interleaved read is served as promptly as a halted one.
+
+**The second settles behavioural versus positional empirically.** A connection _is_ answered about a
+resume it issued, even as the second connection on the port. So connections genuinely are equals, and
+`frontend_state` is the only thing that differs — exactly what the source said, now confirmed on the
+wire.
+
+**This sharpens §4.7's rule without changing it.** The reason a mux cannot live on a secondary is not
+that secondaries are second-class — they are not. It is that **the mux may not resume** (§4.5), and
+neither does the secondary's GDB, so nobody on that connection ever resumes and no stop reply is ever
+generated for it. The mux must sit where the resumes happen, which is the controller. Same conclusion,
+precise reason.
+
+The probe's `qSupported` reply also matches the transcribed fixture in `caps.rs` byte for byte
+(`PacketSize=4000`, no `binary-upload`), so that fixture is accurate.
+
+**A side benefit for §4.7:** session A's 66 reads are the "inject on the secondary connection"
+arrangement already working in production — it is what live-watch RTT does today. That idea is not
+speculative; it is current shipping behaviour seen from another angle.
+
+The other fact from building live watch still stands, and is unrelated:
+
+**Connection slots are rationed, per core, with a default of 1.** OpenOCD's `-gdb-max-connections` is
+a **per-target** property whose default is 1. Live watch only works because `CDLiveWatchSetup` in
+`packages/mcu-debug/support/openocd-helpers.tcl` walks `[target names]` and increments it on each
+one. That helper is added unconditionally to the OpenOCD command line, so the slot exists whether or
+not live watch is enabled — but it has no analogue on any other server.
 
 Under the mux there is exactly one connection to the server and **we are it**, so:
 
 - No connection-limit bump is needed for the Agent's own consumers. The `CDLiveWatchSetup` hack
   remains only for as long as `duplicateStream` gives additional GDB clients their own server
   connections (§4.7) — and disappears entirely under the maximal version of the mux.
-- **The run/stop state model comes to us directly**, on the connection the server actually talks
-  to, rather than being reconstructed second-hand. The state model in §3.10 is therefore not best
-  effort; it is the server's own view.
-
-Together these are the strongest argument for the choice made in this section, and they were not
-obvious when the design first went the other way.
+- **The run/stop state model comes to us directly**, because the mux sits on the connection that
+  issues the resumes. The state model in §3.10 is therefore not best effort; it is the server's own
+  view, and for a structural reason rather than an incidental one.
 
 ### It is GDB that forbids inspection while running, not the server
 
@@ -223,7 +326,7 @@ Each of these kills an otherwise-reasonable implementation.
     **Per-core (the debug session itself).** Shared by every connection to that core's gdb port,
     because it _is_ the target, not a view of it.
     - Run/stop state. One core is running or halted; there is no per-connection answer. But the
-      server only _reports_ transitions to the first connection (§2) — so the state is shared
+      server only _reports_ a transition to the connection that asked for it (§2) — so the state is shared
       while the notification is not.
     - `Z` / `z` — the breakpoint table is target state on most servers, so a stray `z` from us
       removes a breakpoint the user set, on every connection at once.
@@ -465,21 +568,44 @@ The mux takes ownership of the server socket in place of `PortInfo.stream` for
 and must never block. This is a hard requirement: the message loop is single-threaded and already
 warns when a request waits 250 ms behind other work.
 
-### 4.7 One mux per core
+### 4.7 One mux, on the controller connection
 
-One mux per gdb port, i.e. per core — mirroring the existing one-TCP-port-per-core allocation, for
-the servers that support multiple cores at all. Internal consumers attach to the mux for the core
-they care about.
+A core's gdb port carries one **controller session** — the GDB that drives execution — and zero or
+more **secondary sessions** (the live-watch GDB today; a second user GDB in principle). The naming
+describes the _role_, not the ordering; describing it positionally is what produced the wrong
+explanation in §2 in the first place.
 
-This is not merely a convenient unit. §3.10 says the debug session's state — run/stop, breakpoints,
-reset — **is** per core, and §2 says the connection limit is a per-core property too
-(`-gdb-max-connections` is set per target). So "one mux per core" is the granularity the servers
-themselves already use, and one `TargetState` machine per mux is the right count.
+**The mux goes on the controller connection, and nowhere else.** Two settled facts make that the only
+workable arrangement rather than a preference:
 
-**Scoping assumption, stated so it can be corrected cheaply:** `handle_duplicate_stream()` keeps
-its current behaviour — each additional GDB client (the live-watch GDB, a second user GDB) gets its
-**own** TCP connection to the server, as today. The mux virtualises _our_ consumers against _one_
-GDB, not multiple GDBs against one socket.
+1. **A stop reply reaches only the connection that issued the resume.** OpenOCD notifies every
+   connection _internally_ — the doubled `gdb-end` in §2 proves each connection's callback runs — but
+   `gdb_frontend_halted` filters on that connection's own `frontend_state` before anything reaches
+   the socket. Measured: 4 breakpoint halts, **0 packets of any kind** to the secondary.
+2. **RSP has no resume notification at all, for anyone.** No packet means "the target is now
+   running"; the resuming client knows because it asked. That is a protocol-level absence, so **no
+   server can ever fix it.**
+
+Together those make a secondary connection's run-state model **structurally impossible to maintain by
+listening** — it would miss every resume even if halts did propagate. Polling `?` is the only
+alternative, and that is a poll with a stale window, not a state model.
+
+The controller connection gets both halves for nothing: it issues the resumes, so it knows when the
+target starts, and it is where the stop reply comes back. A mux sitting there has an exact state model
+with no added traffic.
+
+**So secondaries need no mux and need not be modelled.** The live-watch GDB keeps doing exactly what
+it does today via `handle_duplicate_stream` and `read_and_forward` — untouched, and none of the mux's
+business. A secondary still costs a connection slot (hence `CDLiveWatchSetup`) and contends for the
+probe, but neither is a protocol matter.
+
+**This simplifies the design rather than constraining it.** `MuxCore` handles exactly one GDB client
+(`RspSource::Gdb` is singular) and owns its own `StateTracker`; since the only connection ever muxed is
+the one that resumes, that is correct by construction. An earlier draft treated the per-connection
+tracker as a latent bug needing a per-core extraction before a second stream could be muxed — with this
+rule there is no second stream to mux.
+
+One mux per core still follows, because there is one controller per core.
 
 The maximal version — all GDB clients _and_ all our consumers on a single server socket per core —
 has grown more attractive in light of §2:
@@ -488,9 +614,9 @@ has grown more attractive in light of §2:
 - It would **remove the need for `CDLiveWatchSetup` entirely** — no `-gdb-max-connections` bump, no
   Tcl helper the user has to load before `init`, and no equivalent to invent for every other
   server.
-- It would let the mux _give_ the live GDB the run/stop state the server refuses to send a second
-  connection, since the mux hears it on the first one. That is a capability the current architecture
-  cannot provide at all.
+- It would let the mux _give_ a secondary the run/stop state no server can send it (see above: RSP has
+  no resume notification, so this is not a server shortcoming to wait out). That is a capability the
+  current architecture cannot provide at all.
 
 Against that, it requires the mux to **virtualise per-connection state per client** (§3.10, first
 half): separate `qSupported` negotiation, separate ack mode, separate `Hg`, separate `qXfer`
@@ -965,21 +1091,58 @@ runs the mux in between. That is a small piece of work, and it is the _only_ rou
 ever be remoted, so the architecture is the enabler rather than the obstacle. It is unstaffed because
 nobody has donated a probe to test against, not because it does not fit.
 
+### Filling the matrix: `mdbg rsp-probe`
+
+```sh
+mdbg rsp-probe --port 3333            # OpenOCD; J-Link 2331, etc.
+mdbg rsp-probe --port 3333 -v         # log every packet both ways
+mdbg rsp-probe --port 3333 --no-resume  # leave the target alone (skips the key test)
+```
+
+Run it against a live gdb port with **no GDB attached**, or as a second client where the
+server allows one. It prints the column below, ready to transcribe.
+
+**Why a tool rather than two GDB sessions.** Attaching a second GDB and watching what it
+sees answers the notification question, but it **cannot** answer the one the design rests
+on — whether a server replies to `m` while a `c` is outstanding on the same connection.
+GDB refuses to send anything while the target runs; that client-side rule is exactly what
+the mux exists to sidestep, so no arrangement of GDB processes can test around it. The
+probe is a raw RSP speaker, built on `frame.rs` and `packet.rs` (codec and builders, no
+policy) and deliberately **not** on `MuxCore`, whose job is to refuse these packets.
+
+**It resumes and halts the target**, because having a `c` outstanding is the state under
+test. It restores a halt afterwards, but a target that was running free is left halted —
+the report says so. `--no-resume` skips those tests entirely.
+
+Questions it answers in one pass: `PacketSize` and every `qSupported` feature; whether
+`QStartNoAckMode` is honoured after being advertised; `?` behaviour; a halted baseline
+read; `x` when `binary-upload` is claimed; whether `depth = 2` pipelining survives in
+no-ack mode; whether a second connection is accepted; **whether `m` is answered while a
+`c` is outstanding**; and whether a second connection is told about run/stop.
+
+That last pair is what §2 and §4.7 turn on. `YES` on the critical row means `Full`; `no`
+means `HaltedOnly` at best. A `no` on the second-connection-notifications row confirms
+§2's asymmetry; a `YES` refutes it, and would mean either connection could host the mux.
+
 ### The matrix to fill in
 
-Phase 3 item 17 answers these per server and records the answers here. OpenOCD's column came from
+Phase 3 item 17 answers these per server and records the answers here — `rsp-probe` above
+does the asking. OpenOCD's column came from
 reading `gdb_server.c` (§4.2.1) — where a server ships source, read it; it is faster and far more
 definite than probing.
 
-| Question                                                          | Why it matters                                                                                             | OpenOCD                                                                                  | J-Link | pyOCD | ST-LINK | probe-rs | QEMU |
-| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------ | ----- | ------- | -------- | ---- |
-| Answers `m`/`x` while a GDB `c` is outstanding?                   | The one thing the design depends on.                                                                       | **Yes** — no halt gate on the read path                                                  | ?      | ?     | ?       | ?        | ?    |
-| Tolerates `depth = 2` in no-ack mode? Less tolerant than OpenOCD? | Sets the pipelining rule.                                                                                  | **Yes** in no-ack; warns and recovers in ack mode                                        | ?      | ?     | ?       | ?        | ?    |
-| `PacketSize`? Advertises `binary-upload+`?                        | Bounds our chunking; picks `x` over `m`.                                                                   | **16384** (`GDB_BUFFER_SIZE`); **no `binary-upload`** — OpenOCD has no `x` packet at all | ?      | ?     | ?       | ?        | ?    |
-| Advertises `QNonStop+`, and honours it?                           | Confirms it is as irrelevant as §2 assumes.                                                                | ?                                                                                        | ?      | ?     | ?       | ?        | ?    |
-| Connection limit — default, and per core?                         | Says whether the maximal mux (§4.7) removes a real setup burden elsewhere or only on OpenOCD.              | **`-gdb-max-connections`, per target, default 1**                                        | ?      | ?     | ?       | ?        | ?    |
-| Run/stop replies to connections after the first?                  | Confirms or refutes §2's explanation of what live watch sees. Cheap: second raw RSP client, resume, watch. | ?                                                                                        | ?      | ?     | ?       | ?        | ?    |
-| **Tier (§7)**                                                     |                                                                                                            | ?                                                                                        | ?      | ?     | ?       | ?        | ?    |
+| Question                                                  | Why it matters                                                               | OpenOCD                                                                               | J-Link | pyOCD | ST-LINK | probe-rs | QEMU |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ------ | ----- | ------- | -------- | ---- |
+| Answers `m`/`x` while the target **runs**?                | The premise the design rests on.                                             | **Yes** — 66 reads observed (§2 A)                                                    | ?      | ?     | ?       | ?        | ?    |
+| …on a connection that **itself** has the `c` outstanding? | The narrower form the mux needs.                                             | **Yes — 0.5 ms**, `rsp-probe` on hardware; chain also traced to `mem_ap_read_buf`     | ?      | ?     | ?       | ?        | ?    |
+| Tolerates `depth = 2` in no-ack mode?                     | Sets the pipelining rule.                                                    | **Yes** — both replies arrived (`rsp-probe`); warns and recovers in ack mode (§4.2.1) | ?      | ?     | ?       | ?        | ?    |
+| `PacketSize`? Advertises `binary-upload+`?                | Bounds chunking; picks `x` over `m`.                                         | **16384**; **no `binary-upload`** — no `x` packet at all                              | ?      | ?     | ?       | ?        | ?    |
+| Advertises `QNonStop+`, and honours it?                   | Confirms it is as irrelevant as §2 assumes.                                  | **no** — not advertised                                                               | ?      | ?     | ?       | ?        | ?    |
+| `QStartNoAckMode` honoured after advertising it?          | The codec must switch at the right byte (§4.3).                              | **Yes**                                                                               | ?      | ?     | ?       | ?        | ?    |
+| Connection limit — default, and per core?                 | Whether the maximal mux (§4.7) removes a real burden elsewhere or only here. | **`-gdb-max-connections`, per target, default 1**                                     | ?      | ?     | ?       | ?        | ?    |
+| Is a **secondary** told about a halt it did not cause?    | Whether a non-controller connection could host a mux (§4.7).                 | **No** — 0 packets across 4 breakpoint halts (§2 B)                                   | ?      | ?     | ?       | ?        | ?    |
+| Is a resume issued on **conn2** answered on conn2?        | Behavioural vs positional. No GDB session can produce this.                  | **Yes** — `T02thread:1;` (`rsp-probe`). **Behavioural, confirmed**                    | ?      | ?     | ?       | ?        | ?    |
+| **Tier (§7)**                                             |                                                                              | **`Full`**                                                                            | ?      | ?     | ?       | ?        | ?    |
 
 **`ServerTier::Unknown` currently gates as `HaltedOnly`, and that default is provisional.** It is
 the conservative reading for a server we know nothing about, and it is what `caps.rs` ships with.
@@ -1031,10 +1194,10 @@ Rejected on four counts, and the last two only became clear in review:
 2. A second connection is not free even where allowed: the slot has to be bought, per core, from a
    limit whose default is 1 (§2). On OpenOCD that means shipping and loading `CDLiveWatchSetup`;
    on other servers it means finding the equivalent, or discovering there is none.
-3. **A second connection is second class.** The server sends run/stop replies only to the first
-   connection, so a companion would have to reconstruct target state by snooping GDB's socket
-   anyway — reintroducing the observer this design was trying to delete, and leaving the state
-   model permanently second-hand.
+3. **A companion could never learn the run state on its own.** A server tells a connection only
+   about resumes _that connection_ issued (§2), and a companion is forbidden to resume — so it
+   would have to reconstruct target state by snooping GDB's socket anyway, reintroducing the
+   observer this design was trying to delete and leaving the state model permanently second-hand.
 4. It cannot ever offer what the maximal mux can (§4.7): giving the live GDB the state the server
    withholds from it.
 
@@ -1170,17 +1333,28 @@ Stderr, GdbRsp { core }, Swo, Tcl, Telnet, Console, Other }` classified once at 
       throttling policy — one classification serves both._
 - [ ] **14.** Give the mux ownership of the server socket for `StreamKind::GdbRsp` streams,
       replacing that stream's `read_and_forward` and the direct `pinfo.stream` write in
-      `message_loop`. One mux per core, created when the stream connects.
+      `message_loop`. **One mux, on the core's controller `GdbRsp` stream only** (§4.7) — the
+      connection that drives execution, and so the only one with a usable run-state model. Secondary
+      streams from `handle_duplicate_stream` (the live-watch GDB) keep `read_and_forward` as today and
+      are not the mux's concern.
 - [ ] **15.** End-to-end pass-through validation: a real debug session against OpenOCD with the mux
       in the path and **no consumers attached** must be indistinguishable from today — same
       behaviour, no measurable added latency. This is the gate before any consumer work; if it
       does not hold, nothing after it matters.
-- [ ] **16.** State/capability observations published to interested parties (`TargetState` changes,
-      `RspCaps`, GDB disconnect), with the per-core fan-in if a core has several GDB streams.
-- [ ] **17.** **Server compatibility matrix** — fill in the table in §7 ("The matrix to fill in")
-      and assign each server a tier. OpenOCD's column is already done, from reading `gdb_server.c`
-      (§4.2.1); the value here is the other five. Where a server ships source, read it rather than
-      probing it.
+- [ ] **16.** Publish the mux's observations to interested parties (`TargetState` changes, `RspCaps`,
+      GDB disconnect). **No per-core state extraction needed** — §4.7's controller rule means the only
+      connection ever muxed is the one that resumes, so `MuxCore`'s own `StateTracker` is correct by
+      construction. Revisit only if the maximal mux (§12 q4) is ever taken on.
+- [x] **17a.** `mdbg rsp-probe` (§7) — a raw-RSP diagnostic that asks a live gdb-server every
+      matrix question in one pass, including the one **no arrangement of GDB processes can test**
+      (does it answer `m` while a `c` is outstanding). Tested against fake servers that do and do
+      not answer while running, so a `no` is a real finding rather than a timeout in our own code.
+- [x] **17b (OpenOCD).** Run on hardware: both critical cells **YES** — `m` answered in 0.5 ms with a
+      `c` outstanding on the same connection, and a resume issued on conn2 answered on conn2. Tier
+      **`Full`**. §7's OpenOCD column is complete.
+- [ ] **17c.** The other five: J-Link, ST-LINK, pyOCD, probe-rs, QEMU. Closed source or a different
+      architecture, so `rsp-probe` is the only way in — there is no chain to trace as there was for
+      OpenOCD.
 
 ### Phase 4 — Consumers _(blocked on §8)_
 

@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
 use mdbg::cockpit::run::AttachArgs;
 use mdbg::cockpit::run::DebugArgs;
 use mdbg::da_helper::run::DaHelperArgs;
+use mdbg::gdb_rsp::probe::RspProbeArgs;
 use mdbg::proxy_helper::run::ProxyArgs;
 use mdbg::serial::cmd::SerialArgs;
 
@@ -49,6 +50,10 @@ enum Commands {
     /// Serial port utilities: list ports or bridge a port over TCP.
     #[command(name = "serial")]
     Serial(SerialArgs),
+
+    /// Probe a gdb-server's RSP capabilities (diagnostic; resumes the target).
+    #[command(name = "rsp-probe")]
+    RspProbe(RspProbeArgs),
 }
 
 // Maps executable names to their implicit subcommand.
@@ -92,5 +97,6 @@ fn main() -> Result<()> {
         Commands::DaHelper(args) => mdbg::da_helper::run::run(args),
         Commands::Proxy(args) => mdbg::proxy_helper::run::run(args),
         Commands::Serial(args) => mdbg::serial::cmd::run(args),
+        Commands::RspProbe(args) => mdbg::gdb_rsp::probe::run_cli(args),
     }
 }

@@ -40,6 +40,7 @@ pub mod chunk;
 pub mod frame;
 pub mod mux;
 pub mod packet;
+pub mod probe;
 pub mod state;
 pub mod trace;
 
