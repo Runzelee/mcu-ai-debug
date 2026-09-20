@@ -5,9 +5,21 @@ a memory read in 0.5 ms on a connection that itself has a `c` outstanding (§7, 
 tier is `Full`. **Phase 1 complete; Phase 2 complete bar item 11b** — `mux.rs` (core,
 sans-IO), `chunk.rs` (splitting and reassembly, sans-IO) and `channel.rs` (the threaded shell that
 owns the byte streams) are written and tested: 146 tests in `packages/mdbg/src/gdb_rsp/`.
-**Nothing is wired in yet** — the module has no callers outside its own `pub mod` line, so runtime
-behaviour is unchanged. Next: Phase 3 items 13–14 to wire it in, which is what unlocks the
-**item 15 real-board pass-through test**. Item 11b is not on that path. Revised 2026-09-19.
+**Phase 3 item 13 (Rust half) done** — `StreamKind`/`StreamRole` and the `stream_id → {name, kind}`
+map on `ProxyServer`, classified at allocation; `handle_duplicate_stream` marks its stream
+`Secondary`. Item 13's wire fields (`packet_size`, mux listener port on `PortReserved`) are deferred
+until the TypeScript side consumes them — item 14 does not need them.
+
+**Nothing is wired in yet.** The `gdb_rsp` module has no callers outside its own `pub mod` line, and
+nothing reads `stream_meta` except `handle_duplicate_stream` populating it. Runtime behaviour is
+unchanged, and **item 14 is the first change that can alter it** — worth its own branch.
+
+**Next: item 14**, which unlocks the **item 15 real-board pass-through test**. Item 11b is not on
+that path.
+
+_Known unrelated flake:_ `proxy_helper::listeners::tests::two_specific_addresses_can_share_a_port`
+fails intermittently (port-binding race, pre-existing, untouched by this work) — don't read it as a
+regression. Revised 2026-09-20.
 
 **Goal:** make the Probe Agent (`mdbg proxy`) a **multiplexer on the GDB Remote Serial Protocol
 connection to the gdb-server**. GDB becomes one client on that connection; the Agent's own

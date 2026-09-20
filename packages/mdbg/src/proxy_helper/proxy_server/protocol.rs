@@ -151,6 +151,125 @@ impl StreamId {
     }
 }
 
+/// Which GDB session a `GdbRsp` stream carries.
+///
+/// A core's gdb port takes one **controller** — the GDB that drives execution — and
+/// any number of **secondaries** (the live-watch GDB today). The names describe the
+/// *role*, not the order, which is the distinction that matters: a server reports a
+/// halt only to the connection that asked for the resume, so only the controller has
+/// a usable run-state model. See `docs-internal/gdb-rsp.md` §4.7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamRole {
+    /// The first GDB on this port — the one issuing `c`/`s`/`vCont`.
+    Controller,
+    /// An additional GDB on the same port, from `handle_duplicate_stream`.
+    Secondary,
+}
+
+/// What a forwarded stream actually carries.
+///
+/// Classified **once**, when the port is allocated, from the `port_ids` name the
+/// client supplied. Nothing downstream re-parses the string: the RSP multiplexer
+/// needs to know which stream is a controller gdb connection, and
+/// `docs-internal/Stream-Flow-Control.md` needs the same split for its throttling
+/// policy (only `Stdout`/`Stderr` may ever be shed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    Control,
+    Stdout,
+    Stderr,
+    /// A GDB Remote Serial Protocol connection for `core`.
+    GdbRsp {
+        core: u16,
+        role: StreamRole,
+    },
+    Swo {
+        core: u16,
+    },
+    Tcl,
+    Telnet,
+    Console {
+        core: u16,
+    },
+    /// Anything else, including the placeholder names some servers use to reserve
+    /// consecutive ports (`gap1`, `gap2`).
+    Other,
+}
+
+impl StreamKind {
+    /// Classify from the client's stream name.
+    ///
+    /// The naming scheme is `createPortName()` in
+    /// `packages/mcu-debug/src/adapter/servers/common.ts`: the base name for core 0
+    /// and the base name plus the core number for cores 1 and up — so `gdbPort`,
+    /// `gdbPort1`, `gdbPort2`. Matching the literal `gdbPort1` would miss core 0,
+    /// which is nearly every session.
+    ///
+    /// Deliberately matched by **known prefix plus an all-digits remainder**, not by
+    /// stripping trailing digits. ST-LINK reserves ports called `gap1` and `gap2`;
+    /// digit-stripping would read those as base `gap` core 1, and worse, for core 1
+    /// `createPortName` produces `gap11`. Requiring a known prefix sidesteps the
+    /// whole question and leaves them `Other`, which is what they are.
+    pub fn classify(name: &str) -> Self {
+        // A controller until something says otherwise: `handle_duplicate_stream` is
+        // the only thing that creates a secondary, and it overrides the role.
+        if let Some(core) = core_suffix(name, "gdbPort") {
+            return StreamKind::GdbRsp {
+                core,
+                role: StreamRole::Controller,
+            };
+        }
+        if let Some(core) = core_suffix(name, "swoPort") {
+            return StreamKind::Swo { core };
+        }
+        if let Some(core) = core_suffix(name, "consolePort") {
+            return StreamKind::Console { core };
+        }
+        if core_suffix(name, "tclPort").is_some() {
+            return StreamKind::Tcl;
+        }
+        if core_suffix(name, "telnetPort").is_some() {
+            return StreamKind::Telnet;
+        }
+        StreamKind::Other
+    }
+
+    /// The core this stream belongs to, where that is meaningful.
+    pub fn core(&self) -> Option<u16> {
+        match self {
+            StreamKind::GdbRsp { core, .. } | StreamKind::Swo { core } | StreamKind::Console { core } => Some(*core),
+            _ => None,
+        }
+    }
+
+    /// True for the one stream per core that the RSP multiplexer may attach to.
+    pub fn is_rsp_controller(&self) -> bool {
+        matches!(
+            self,
+            StreamKind::GdbRsp {
+                role: StreamRole::Controller,
+                ..
+            }
+        )
+    }
+
+    /// Whether output on this stream may be dropped under load
+    /// (`docs-internal/Stream-Flow-Control.md`). Only diagnostic logging may.
+    pub fn is_throttleable(&self) -> bool {
+        matches!(self, StreamKind::Stdout | StreamKind::Stderr)
+    }
+}
+
+/// `Some(core)` when `name` is `base` followed by nothing (core 0) or by a core
+/// number. `None` for any other name, including `base` followed by non-digits.
+fn core_suffix(name: &str, base: &str) -> Option<u16> {
+    let rest = name.strip_prefix(base)?;
+    if rest.is_empty() {
+        return Some(0);
+    }
+    rest.parse().ok()
+}
+
 // ── Port allocator types ──────────────────────────────────────────────────────
 
 /// These ports are allocated as a group, consecutively
@@ -473,5 +592,142 @@ impl ProxyServerEvents {
     pub fn send(&self, writer: &super::FrameWriter) -> io::Result<()> {
         let event_bytes = serde_json::to_vec(self)?;
         writer.write_frame(StreamId::Control.to_u8(), &event_bytes)
+    }
+}
+
+#[cfg(test)]
+mod stream_kind_tests {
+    use super::*;
+
+    #[test]
+    fn core_zero_has_no_suffix() {
+        // `createPortName` suffixes only when procNum != 0, so core 0 is the bare
+        // base name. Matching the literal `gdbPort1` would miss nearly every session.
+        assert_eq!(
+            StreamKind::classify("gdbPort"),
+            StreamKind::GdbRsp {
+                core: 0,
+                role: StreamRole::Controller
+            }
+        );
+        assert_eq!(StreamKind::classify("swoPort"), StreamKind::Swo { core: 0 });
+        assert_eq!(StreamKind::classify("consolePort"), StreamKind::Console { core: 0 });
+    }
+
+    #[test]
+    fn higher_cores_carry_their_number() {
+        for core in 1u16..=4 {
+            assert_eq!(
+                StreamKind::classify(&format!("gdbPort{core}")),
+                StreamKind::GdbRsp {
+                    core,
+                    role: StreamRole::Controller
+                }
+            );
+            assert_eq!(
+                StreamKind::classify(&format!("swoPort{core}")),
+                StreamKind::Swo { core }
+            );
+        }
+    }
+
+    #[test]
+    fn tcl_and_telnet_are_not_per_core() {
+        assert_eq!(StreamKind::classify("tclPort"), StreamKind::Tcl);
+        assert_eq!(StreamKind::classify("tclPort1"), StreamKind::Tcl);
+        assert_eq!(StreamKind::classify("telnetPort"), StreamKind::Telnet);
+    }
+
+    #[test]
+    fn stlinks_gap_placeholders_are_not_mistaken_for_cores() {
+        // ST-LINK reserves ports named `gap1`/`gap2` purely to keep a block
+        // consecutive. Stripping trailing digits would read `gap1` as base `gap`
+        // core 1 -- and for core 1 `createPortName` produces `gap11`, which is
+        // worse. Requiring a known prefix makes the question moot.
+        for name in ["gap1", "gap2", "gap11", "gap21"] {
+            assert_eq!(StreamKind::classify(name), StreamKind::Other, "{name}");
+            assert!(StreamKind::classify(name).core().is_none());
+            assert!(!StreamKind::classify(name).is_rsp_controller());
+        }
+    }
+
+    #[test]
+    fn a_known_prefix_followed_by_non_digits_is_not_a_match() {
+        // Guards the prefix rule against a future name that merely starts the same.
+        for name in ["gdbPortExtra", "gdbPort1a", "swoPortX", "gdbPortsomething"] {
+            assert_eq!(StreamKind::classify(name), StreamKind::Other, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_name_every_server_controller_asks_for_classifies() {
+        // The union of `portsNeeded` across all server controllers in
+        // `packages/mcu-debug/src/adapter/servers/`, for cores 0..2. Nothing may
+        // panic, and every gdb port must come out as a controller RSP stream.
+        let bases = [
+            "gdbPort",     // all servers
+            "swoPort",     // jlink, pemicro, probe-rs, pyocd, stlink, openocd
+            "consolePort", // jlink, pemicro, probe-rs, pyocd
+            "tclPort",     // openocd
+            "telnetPort",  // openocd
+            "gap1",        // stlink
+            "gap2",        // stlink
+        ];
+        for core in 0u16..3 {
+            for base in bases {
+                let name = if core == 0 {
+                    base.to_string()
+                } else {
+                    format!("{base}{core}")
+                };
+                let kind = StreamKind::classify(&name);
+                if base == "gdbPort" {
+                    assert!(kind.is_rsp_controller(), "{name} should be a controller RSP stream");
+                    assert_eq!(kind.core(), Some(core), "{name}");
+                } else {
+                    assert!(!kind.is_rsp_controller(), "{name} must not be an RSP stream");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_controller_gdb_stream_may_host_the_mux() {
+        let controller = StreamKind::GdbRsp {
+            core: 0,
+            role: StreamRole::Controller,
+        };
+        let secondary = StreamKind::GdbRsp {
+            core: 0,
+            role: StreamRole::Secondary,
+        };
+        assert!(controller.is_rsp_controller());
+        // The live-watch GDB's stream. A mux here would never see a resume, so its
+        // run-state model would never leave `Unknown` (gdb-rsp.md §4.7).
+        assert!(!secondary.is_rsp_controller());
+        assert!(!StreamKind::Swo { core: 0 }.is_rsp_controller());
+        assert!(!StreamKind::Other.is_rsp_controller());
+    }
+
+    #[test]
+    fn only_diagnostic_output_may_be_throttled() {
+        // Stream-Flow-Control.md: dropping RSP corrupts the protocol; serial and SWO
+        // are user-rate-controlled. Only the gdb-server's own logging firehoses.
+        assert!(StreamKind::Stdout.is_throttleable());
+        assert!(StreamKind::Stderr.is_throttleable());
+        for kind in [
+            StreamKind::Control,
+            StreamKind::GdbRsp {
+                core: 0,
+                role: StreamRole::Controller,
+            },
+            StreamKind::Swo { core: 0 },
+            StreamKind::Console { core: 0 },
+            StreamKind::Tcl,
+            StreamKind::Telnet,
+            StreamKind::Other,
+        ] {
+            assert!(!kind.is_throttleable(), "{kind:?} must never be throttled");
+        }
     }
 }

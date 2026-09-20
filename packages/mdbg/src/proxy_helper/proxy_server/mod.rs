@@ -154,6 +154,18 @@ pub struct PortInfoListner {
     listener: Option<TcpListener>,
 }
 
+/// What the client called a stream, and what we decided it carries.
+///
+/// Kept in a side map on [`ProxyServer`] rather than on [`PortInfo`], because a
+/// `PortInfo` is created from a `PortConnected`/`PortReady` event that carries only a
+/// stream id and a port — the name is dropped when `reserved_ports` is drained into
+/// `handle_start_gdb_server`. The map outlives that drain.
+pub struct StreamMeta {
+    /// The `port_ids` string the client supplied (`gdbPort`, `swoPort1`, …).
+    pub name: String,
+    pub kind: StreamKind,
+}
+
 // ── ProxyServer ───────────────────────────────────────────────────────────────
 
 pub struct ProxyServer {
@@ -172,6 +184,10 @@ pub struct ProxyServer {
     streams: HashMap<u8, PortInfo>,
     /// Counter for assigning unique dynamic stream IDs (starts at 3; 0–2 are reserved).
     next_stream_id: u8,
+    /// Stream id → what that stream is. Classified once at allocation so nothing
+    /// downstream re-parses a name; the RSP multiplexer uses it to find the one
+    /// controller gdb stream per core (`docs-internal/gdb-rsp.md` §4.7).
+    stream_meta: HashMap<u8, StreamMeta>,
     exit: bool,
     /// Ports reserved via `AllocatePorts` but not yet handed to the gdb-server process.
     reserved_ports: Vec<PortInfoListner>,
@@ -248,6 +264,7 @@ impl ProxyServer {
             event_rx,
             event_tx,
             next_stream_id: 3,
+            stream_meta: HashMap::new(),
             server_cwd: String::new(),
             monitor_stop_tx: None,
             serial_registry,

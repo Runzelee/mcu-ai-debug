@@ -221,6 +221,20 @@ impl ProxyServer {
                 for (count, id_string) in port_set.port_ids.iter().enumerate() {
                     let listener = ports[count].try_clone().ok();
                     let port = listener.as_ref().unwrap().local_addr().unwrap().port();
+                    // Classify once, here, from the name the client chose. Every later
+                    // decision reads `stream_meta`; nothing re-parses the string.
+                    let kind = StreamKind::classify(id_string);
+                    eprintln!(
+                        "Stream '{}' (id {}) classified as {:?}",
+                        id_string, self.next_stream_id, kind
+                    );
+                    self.stream_meta.insert(
+                        self.next_stream_id,
+                        StreamMeta {
+                            name: id_string.clone(),
+                            kind,
+                        },
+                    );
                     self.reserved_ports.push(PortInfoListner {
                         port,
                         stream_id: self.next_stream_id,
@@ -455,6 +469,32 @@ impl ProxyServer {
                 let port = pinfo.port;
                 let cur_stream_id = self.next_stream_id;
                 self.next_stream_id += 1;
+                // The duplicate is a **secondary** session on the same port -- the
+                // live-watch GDB, today. Recording that is what keeps the RSP
+                // multiplexer off it: a secondary never issues a resume, so a server
+                // never sends it a stop reply, so a mux there would sit at
+                // `TargetState::Unknown` for ever (`docs-internal/gdb-rsp.md` §4.7).
+                let dup_kind = match self.stream_meta.get(&stream_id).map(|m| m.kind) {
+                    Some(StreamKind::GdbRsp { core, .. }) => StreamKind::GdbRsp {
+                        core,
+                        role: StreamRole::Secondary,
+                    },
+                    Some(other) => other,
+                    None => StreamKind::Other,
+                };
+                let dup_name = self
+                    .stream_meta
+                    .get(&stream_id)
+                    .map(|m| format!("{}#dup{}", m.name, cur_stream_id))
+                    .unwrap_or_else(|| format!("dup{cur_stream_id}"));
+                eprintln!("Duplicated stream {} as {} ({:?})", stream_id, cur_stream_id, dup_kind);
+                self.stream_meta.insert(
+                    cur_stream_id,
+                    StreamMeta {
+                        name: dup_name,
+                        kind: dup_kind,
+                    },
+                );
                 self.reserved_ports.push(PortInfoListner {
                     port,
                     stream_id: cur_stream_id,
