@@ -1,0 +1,222 @@
+# Change Log
+
+> **Pre-release:** there is no release version yet. Install via the dropdown beside **Install**
+> and pick *Install Pre-Release Version*; see the README for why the plain button complains.
+
+## [Unreleased]
+
+## [v0.1.18] - 2026-09-??
+
+### Find in the MCU DEBUG panel
+
+- **`Ctrl+F` searches the output of the tab you are on** (`Cmd+F` on macOS). Until now, finding
+  something in a long serial or RTT log meant scrolling and reading. The bar offers match case,
+  whole word, and regular expression, and keeps a running count of matches
+- `Enter` and `Shift+Enter` step through matches, as do `F3` and `Shift+F3`; `Escape` closes the
+  bar. The shortcut works wherever you are in the tab — the output, the input line, or the
+  search box
+- **Matches are marked beside the scrollbar**, the way the editor marks them, so you can see
+  where they fall in the scrollback rather than stepping through blindly
+- Every tab keeps its own search, output keeps arriving while the bar is open, and the bar sits
+  inside the output area rather than over the tabs, so you can still switch tabs while searching.
+  Searching covers the scrollback the tab is holding, not the full session log
+
+### Panel terminals
+
+- **Right-click a tab's output and choose Clear Terminal** to empty it. There was no way to do
+  this from the UI before — a tab that had been collecting output for hours could only be read
+  around. It clears the tab you clicked on, and is also in the Command Palette as
+  **MCU-Debug: Clear Terminal**, where it clears whichever tab is in front
+- **Up and Down recall what you typed before.** Every tab that has an input line now keeps its
+  own history: the half-typed line is put aside while you browse and comes back when you arrive
+  past the newest entry, and a command repeated twice in a row is only stored once. The history
+  survives the panel being hidden and reopened, and matches the keys the TUI and the CLI already
+  had. Ports in raw mode are unchanged — there, every keystroke belongs to the device
+- **The terminal engine was updated** (xterm.js 5.5 → 6.0, eighteen months of fixes). The change
+  you will notice is the scrollbar: it is now the same one the rest of VS Code uses, sized and
+  themed to match, in place of a plain browser scrollbar
+
+### Messaging an AI now has its own command
+
+- **Use `!!ai <text>` to send a message to an attached AI.** Any line starting with `!!` used to
+  be treated as one, which had two costs: a mistyped meta-command was quietly relayed as chat
+  instead of being reported — `!!sigin` became a note to the AI rather than an interrupt — and no
+  line beginning with `!!` could ever be sent onward. **If you type `!!` messages today, add
+  `ai`.** `!!send`, `!!SIGINT`, `!!RESET`, `!!NOTE:` and `!!AI-REQUEST:` are unaffected
+- Anything else starting with `!!` is now reported as an unknown meta-command wherever it comes
+  from, rather than being silently accepted. `!!ai` with nothing after it prints how to use it
+  instead of sending an empty message
+
+## [v0.1.17] - 2026-09-16
+
+### Serial ports
+
+- **Several clients can watch the same port at once.** The serial panel and the CLI attached
+  to one port used to take turns, so one of them showed nothing. Each now gets the full live
+  output and can type into the port
+- **Serial ports open before the debug session starts.** They were opened partway through the
+  launch, so a target that ran its firmware quickly could print its first lines before anyone
+  was listening. Early boot output is now captured
+- **A client that joins late sees the last minute of output, not everything since the port
+  opened.** A new panel or CLI session used to open with a backlog that could be an hour old,
+  with nothing to tell it apart from what the target was printing now
+
+## [v0.1.16] - 2026-09-13
+
+### Seeing what the Probe Agent is doing
+
+- **New command: MCU-Debug Developer: Show Probe Agent Status.** The Probe Agent is the
+  background process that talks to your debug probe. It is shared by every window and by the
+  CLI, and it outlives the window that started it — so until now there was no way to see it at
+  all from inside VS Code. The command reports every agent running on the machine with the
+  probe: version, uptime, how many debug sessions it is serving, which addresses it accepts
+  connections on, any serial ports it holds open, and whether its executable has been replaced
+  since it started
+- **MCU-Debug Developer: Check MCU-Debug Proxy** is now **Check Proxy Extension**. "Proxy"
+  was being used for two different things — the companion extension and the background agent —
+  and the two questions have separate answers, so they now have separate commands with names
+  that say which is which
+- `mcu-debug proxy --status` reports the same executable detail, with timestamps in a form you
+  can read rather than epoch numbers
+
+
+### Session notes
+
+- **Fixed a way to lose every note you had ever taken.** `.mcu-debug/notes.json` is the record
+  an AI builds up across sessions, and it was rewritten by truncating the file and writing it
+  again. A crash, a power cut, or the `kill -9` we tell you not to use, landing in that window,
+  left it truncated — not this session's notes, all of them. It is now written to a temporary
+  file and renamed into place, so the file on disk is always a complete one
+- A `!!NOTE:` no longer discards notes taken by another session running in the same workspace.
+  The whole file was rewritten from whatever was loaded at startup, so a second session on a
+  different launch configuration would roll the first one back
+- Bursts of notes are coalesced into a single write. `!!NOTE:` is issued by an AI, not typed by
+  a person, so dozens can arrive at once — and each one used to rewrite the entire file twice
+  while the debug session waited. Notes now reach disk within a quarter-second of the first one
+  in a burst
+
+### Housekeeping
+
+- The `.mcu-debug` directory the CLI creates now gets a `.gitignore`, so session logs and notes
+  stop showing up in `git status`. An existing one is left alone
+- `.mcu-debug/archive` is pruned in the background: the 50 most recent sessions, or 64 MB of
+  logs, whichever comes first. A session's log and its notes snapshot are removed together, so
+  you never end up with evidence and no conclusions or the reverse. A gdb-server that loses its
+  USB device can emit hundreds of errors a second, and one such afternoon could leave tens of
+  megabytes behind
+
+## [v0.1.15] - 2026-09-11
+
+### Fixed: MCU-Debug would not start in a remote workspace
+
+- **If you are on v0.1.14 and work in WSL, a dev container, or over Remote-SSH, upgrade.** In
+  that release MCU-Debug declared
+  [MCU-Debug Proxy Server](https://marketplace.visualstudio.com/items?itemName=mcu-debug.mcu-debug-proxy)
+  as an extension dependency so VS Code would install it for you. That works locally, but VS
+  Code resolves extension dependencies on the *workspace* side — and the proxy runs on the UI
+  side, because it has to reach a debug probe attached to your local machine. In a remote
+  window the requirement could therefore never be satisfied, and VS Code refused to activate
+  MCU-Debug at all
+- The declaration is gone. MCU-Debug now checks for the proxy at runtime, and only for
+  configurations that actually need it — `hostConfig` with type `auto`. Local debugging never
+  needs it, and `hostConfig.type: "ssh"` does not either, since that path starts its own agent
+  over SSH
+- If the proxy is missing when it is needed, you are told why and offered the install, rather
+  than finding the extension silently inactive
+- New command **MCU-Debug Developer: Check Proxy Extension** reports whether the proxy is
+  reachable and which versions the two extensions are at. Worth running first if remote
+  debugging misbehaves
+
+### Serial and RTT are now two-way
+
+- **New `!!send` meta-command writes to a serial port or RTT channel.** Until now those streams
+  were read-only from a debug session: you could watch firmware print `Press 'Enter' to continue`
+  and had no way to answer it, because stdin belongs to GDB. `!!send` addresses a stream by the
+  same prefix that tags its output — `!!send [ttyACM0] help`, or just `!!send` to answer a bare
+  Enter prompt. Serial menus and UART shells are now reachable from the session, and from an AI
+  agent driving it. See
+  [Meta-Commands](https://mcu-debug.github.io/mcu-debug/docs/reference/meta-commands)
+- Messages you type to an attached AI agent (any other `!!` text) are now documented, and are no
+  longer written straight to the console outside the normal output stream. They are seen by any
+  AI attached to the session as user requests
+
+### Target output fidelity
+
+- **Lines from a serial port no longer arrive split.** The reassembly timer measured time since
+  the first byte rather than silence on the port, so on a busy port it fired mid-line at fixed
+  intervals and cut output at arbitrary places
+- Blank lines and trailing spaces printed by firmware are preserved instead of being dropped —
+  `printf("...\r\n\n")` now renders the way it was written
+- Cursor movement and screen control from the target is stripped, keeping colour. Firmware that
+  redraws a status line in place was overwriting the stream's prefix and producing garbled text,
+  and a `\x1b[2J` at startup could clear the debug session's scrollback. In-place redraws now
+  read as a scrolling transcript
+- Lower latency on serial and RTT traffic, most noticeably to a probe on another machine
+  (WSL, container, or SSH)
+
+### TUI
+
+- **The newest output is no longer hidden when a line wraps.** The output pane sized itself in
+  lines rather than screen rows, so every wrapped line pushed one line off the bottom — on a
+  narrow window the most recent output could be permanently invisible
+
+### CLI
+
+- Added `--nostdin` for running a session in the background, where reading the terminal would
+  otherwise suspend the process. Implies `--wait-for-client`
+- Meta-commands are now recognised regardless of case. `!!NOTE:` and `!!AI-REQUEST:` used to
+  require exact capitalisation, and a lower-case variant was silently relayed as a message
+  instead of being executed — losing the note
+- An unrecognised meta-command is now reported as a warning rather than an informational line
+
+## [v0.1.14] - 2026-09-10
+
+- MCU-Debug now declares
+  [MCU-Debug Proxy Server](https://marketplace.visualstudio.com/items?itemName=mcu-debug.mcu-debug-proxy)
+  as an extension dependency, so VS Code installs it for you. The proxy is what lets MCU-Debug
+  reach a debug probe attached to a different machine than your workspace — WSL, a dev container,
+  or a lab server over SSH. If you only debug locally it sits idle and costs nothing, but do not
+  uninstall it: VS Code will not load MCU-Debug while a declared dependency is missing
+
+## [v0.1.12] - 2026-09-10
+
+### AI / CLI
+
+- Added a skill template for AI agents, shipped with the extension and published at
+  [Writing Skills and Prompts](https://mcu-debug.github.io/mcu-debug/docs/ai/writing-skills).
+  It documents the session lifecycle, the tagged output stream, meta-commands, and the
+  troubleshooting cases that come up on real hardware
+- **GDB commands are no longer blocked while the target is running.** The CLI used to silently
+  discard any command sent while the core was executing — no error, no echo, nothing in the
+  stream. Because mcu-debug drives GDB through the MI interface, plenty of commands are legal
+  while running, and GDB itself rejects the ones that are not. Commands are now delivered
+  whatever the state and GDB decides
+- Commands sent while the target is running are now echoed to the log/socket stream
+  (`user-input` / `socket-input`), as they always were when paused
+- Session status notifications now carry machine-readable `status` and `reason` **fields**
+  alongside the human-readable message, so consumers no longer have to parse prose. `status` is
+  one of `not-started`, `starting`, `initialized`, `running`, `paused`, `terminated`
+- The history replayed to a newly connected socket client now always begins at a whole line.
+  Previously the ring buffer could wrap mid-record, so the first thing a client received was a
+  truncated JSON fragment
+- `mcu-debug attach` now exits when its stdin closes, instead of lingering with a half-dead
+  connection. Detaching this way leaves the debug session running so it can be re-attached to
+- **Breaking:** the `startedAt` field in `.mcu-debug/socket.json` is now `started`, matching
+  what the Rust side has always expected. Anything parsing that file needs updating
+
+### Live Watch
+
+- Live watch can now lazy-start: registering a client connection starts the connection
+  automatically rather than requiring it to be up front
+- Added `always` vs `onReady` client modes for the live GDB connection
+- Added client unregistration, and clean-up of GDB variables when children change
+- `LiveConnectedEvent` now reports failure with a reason instead of failing silently
+
+### Fixes
+
+- Better error messages from memory read/write, including `Busy` and `notStopped` status
+
+## [v0.1.11] - 2026-08-29
+
+- See the [GitHub releases](https://github.com/mcu-debug/mcu-debug/releases) for history prior
+  to this changelog

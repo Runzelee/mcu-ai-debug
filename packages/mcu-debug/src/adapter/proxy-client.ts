@@ -2,13 +2,12 @@ import * as net from "net";
 import * as fs from "fs";
 import * as path from "path";
 import { GDBDebugSession } from "./gdb-session";
-import { GDBServerSession, getEnvFromConfig } from "./server-session";
-import { canonicalizePath, ConfigurationArguments, TcpPortDef, TcpPortDefMap, awaitWithTimeout } from "./servers/common";
-import { existsSync } from "fs";
-import { DebugHelper } from "./helper";
+import { GDBServerSession } from "./server-session";
+import { canonicalizePath, ConfigurationArguments, TcpPortDef, TcpPortDefMap, processEnvForConfig } from "./servers/common";
 import { Stderr, Stdout } from "./gdb-mi/mi-types";
-import { ChildProcess, spawn } from "child_process";
+import { DefaultPortBase } from "@mcu-debug/shared";
 import { ControlMessage } from "@mcu-debug/shared/proxy-protocol/ControlMessage";
+import { PROXY_KEEPALIVE_MS } from "../common/utils";
 import { PortReserved } from "@mcu-debug/shared/proxy-protocol/PortReserved";
 import { PortSet } from "@mcu-debug/shared/proxy-protocol/PortSet";
 import { PortAllocatorSpec } from "@mcu-debug/shared/proxy-protocol/PortAllocatorSpec";
@@ -16,6 +15,7 @@ import { EventEmitter } from "stream";
 import * as crypto from "crypto";
 import { glob, GlobOptions } from "glob";
 import { isUnsafeRelativeSyncPath, resolveSyncRelativePathForFile } from "./sync-files-utils";
+import { pkgJsonVersion } from "../commit-hash";
 
 type StreamStatus = "starting" | "connected" | "ready" | "timedOut" | "closed";
 
@@ -27,7 +27,7 @@ export class PortReservedInfo {
         public stream_id: number,
         public stream_id_str: string,
         public status: StreamStatus = "starting",
-    ) {}
+    ) { }
 }
 
 export class ProxyClient extends EventEmitter {
@@ -36,7 +36,6 @@ export class ProxyClient extends EventEmitter {
     private timeout = 20 * 1000; // 20 seconds
     private nextSeq: number = 1;
     private args: ConfigurationArguments;
-    private proxyProcess: ChildProcess | null = null;
     private socket: net.Socket | null = null;
     private clientStreams: Map<number, RemoteServer> = new Map();
     private heartbeatTimer: NodeJS.Timeout | null = null;
@@ -65,13 +64,22 @@ export class ProxyClient extends EventEmitter {
 
     async start(): Promise<boolean> {
         this.args = this.session.args;
-        if (!this.args.hostConfig) {
+        if (!this.args.hostConfig || typeof this.args.hostConfig !== "object") {
             return false;
         }
         const networkMode = this.args.hostConfig.pvtNetworkMode || this.args.hostConfig.type;
         const remoteHost = this.args.hostConfig.pvtProxyHost || "127.0.0.1";
-        const remotePort = this.args.hostConfig.pvtProxyPort || 4567;
-        const token = this.args.hostConfig.token || this.args.hostConfig.pvtProxyToken || "adis-ababa";
+        const remotePort = this.args.hostConfig.pvtProxyPort;
+        // Resolved value first — see the note in serial-manager.ts's connect().
+        const token = this.args.hostConfig.pvtProxyToken;
+        if (!remotePort) {
+            this.logError(`Bug? Proxy port is not specified in hostConfig.pvtProxyPort`);
+            return false;
+        }
+        if (!token) {
+            this.logError(`Bug? Proxy token is not specified in hostConfig.pvtProxyToken`);
+            return false;
+        }
         this.logInfo(`Starting proxy client with network mode: ${networkMode}, remote host: ${remoteHost}, remote port: ${remotePort}, token: ${token}`);
         try {
             if (!(await this.connectToProxy(remoteHost, remotePort))) {
@@ -93,13 +101,12 @@ export class ProxyClient extends EventEmitter {
                 method: "initialize",
                 params: {
                     token: token,
-                    version: "1.0.3",
+                    version: pkgJsonVersion,
                     workspace_uid: cdir,
                     session_uid: sdir,
-                    port_wait_mode: "monitor",
                 },
             };
-            await awaitWithTimeout(this.sendControlCommand(cmd), this.timeout);
+            await this.sendControlCommand(cmd);
             this.logDebug(`Proxy session initialized`);
             this.cwd = cwd;
             return true;
@@ -140,7 +147,7 @@ export class ProxyClient extends EventEmitter {
      */
     private async syncFiles() {
         const cwd = this.cwd;
-        const syncFiles = this.session.args.hostConfig?.syncFiles || [];
+        const syncFiles = (typeof this.session.args.hostConfig === "object" && this.session.args.hostConfig?.syncFiles) || [];
         let counter = 0;
         const maxFiles = 20; // Limit the number of files to sync to prevent abuse and performance issues
         let hitMaxFiles = false;
@@ -203,7 +210,7 @@ export class ProxyClient extends EventEmitter {
                             },
                         };
                         this.logDebug(`Syncing file ${f} to remote path ${rPath} with size ${content.length} bytes`);
-                        await awaitWithTimeout(this.sendControlCommand(cmd), this.timeout).catch((err) => {
+                        await this.sendControlCommand(cmd).catch((err) => {
                             hadSyncFailures = true;
                             this.logError(`Failed to sync file ${f} to ${remotePath}: ${err}`);
                         });
@@ -239,18 +246,82 @@ export class ProxyClient extends EventEmitter {
         }
     }
 
-    private sendControlCommand(cmd: ControlMessage): Promise<any> {
+    /**
+     * Send a control command and wait for the proxy's response.
+     *
+     * The timeout lives here rather than in a wrapper at the call site, so that it can name the
+     * command that hung and -- more importantly -- drop the entry from `pendingPromises`. An outer
+     * timeout racing this promise abandons that entry permanently.
+     *
+     * @param useTimeout milliseconds to wait. <= 0 waits indefinitely, until a response or until
+     * the socket closes.
+     */
+    private sendControlCommand(cmd: ControlMessage, useTimeout: number = this.timeout): Promise<any> {
         if (!this.socket) {
             this.logError("Proxy socket is not connected");
-            return Promise.reject(new Error("Proxy socket is not connected"));
+            return Promise.reject(new Error(`Proxy socket is not connected ('${cmd.method}' seq ${cmd.seq})`));
         }
-        const msg = JSON.stringify(cmd);
-        const buffer = Buffer.from(msg, "utf-8");
-        this.sendCommandBytes(0, buffer);
-        const ret = new Promise((resolve, reject) => {
-            this.pendingPromises.set(cmd.seq, { resolve, reject });
+
+        return new Promise((resolve, reject) => {
+            let timer: NodeJS.Timeout | undefined;
+            // Log the send, and report the round trip on settle. Without the send time
+            // a response log tells you when the answer arrived but not how long it took,
+            // and the two sides' clocks cannot be assumed to agree.
+            const sentAt = Date.now();
+            this.logDebug(`Sending request: seq ${cmd.seq} '${cmd.method}'\n`);
+            // Every exit goes through here, so the map entry and the timer are released exactly
+            // once regardless of who wins -- response, timeout, or the socket closing.
+            //
+            // This is also the single place a request's outcome is logged. The response
+            // handler used to log its own line, which meant every request produced two
+            // entries saying the same thing -- and that line could not see a timeout or a
+            // dropped socket, because neither goes through it.
+            const settle = (ok: boolean, done: (arg?: any) => void, arg?: any) => {
+                if (timer) {
+                    clearTimeout(timer);
+                    timer = undefined;
+                }
+                this.pendingPromises.delete(cmd.seq);
+                const outcome = ok ? "ok" : `error: ${arg?.message ?? arg}`;
+                this.logDebug(`Settled request: seq ${cmd.seq} '${cmd.method}' ${outcome} after ${Date.now() - sentAt}ms\n`);
+                done(arg);
+            };
+
+            this.pendingPromises.set(cmd.seq, {
+                resolve: (value: any) => settle(true, resolve, value),
+                reject: (reason: any) => settle(false, reject, reason),
+            });
+
+            if (useTimeout > 0) {
+                timer = setTimeout(() => {
+                    // Only a genuine timeout is reported as one. Errors returned by the proxy are
+                    // surfaced with the proxy's own message by the response handler.
+                    const msg = `Proxy command '${cmd.method}' (seq ${cmd.seq}) timed out after ${useTimeout}ms`;
+                    this.logError(msg);
+                    settle(false, reject, new Error(msg));
+                }, useTimeout);
+                timer.unref();
+            }
+
+            try {
+                this.sendCommandBytes(0, Buffer.from(JSON.stringify(cmd), "utf-8"));
+            } catch (e) {
+                settle(false, reject, e);
+            }
         });
-        return ret;
+    }
+
+    /**
+     * Fail every in-flight control command. Without this a dropped socket left its callers
+     * waiting on promises that could never settle -- the response was never coming, and nothing
+     * else touched the map.
+     */
+    private failPendingCommands(err: Error) {
+        const pending = [...this.pendingPromises.values()];
+        this.pendingPromises.clear();
+        for (const { reject } of pending) {
+            reject(err);
+        }
     }
 
     public sendCommandBytes(stream_id: number, data: Buffer) {
@@ -267,31 +338,56 @@ export class ProxyClient extends EventEmitter {
     async stop(): Promise<void> {
         this.endingSession = true;
         this.stopHeartbeat();
-        const cmd: ControlMessage = {
-            seq: this.nextSeq++,
-            method: "endSession",
-        };
-        try {
-            await awaitWithTimeout(this.sendControlCommand(cmd), this.timeout);
-        } catch (err) {
-            this.logError(`Failed to end proxy session: ${err}`);
+        if (this.socket) {
+            // Only send endSession if the socket is still connected — mirrors the non-proxy
+            // pattern of checking exitCode before killing the local gdb-server process.
+            // If the socket is already gone, the remote gdb-server has already exited.
+            const cmd: ControlMessage = {
+                seq: this.nextSeq++,
+                method: "endSession",
+            };
+            try {
+                await this.sendControlCommand(cmd);
+            } catch (err) {
+                this.logError(`Failed to end proxy session: ${err}`);
+            }
+            // Half-close our write side, then wait for the Rust proxy to close the
+            // connection from its side. The Rust proxy kills the gdb-server process
+            // asynchronously after sending the endSession response; if we immediately
+            // tear down the forwarding streams, the sudden stream closures race with
+            // (and can preempt) that kill. Waiting for the socket close event ensures
+            // the Rust side has finished cleanup before we destroy local streams.
+            // A 2-second fallback covers the case where Rust never closes the socket.
+            if (this.socket) {
+                const sock = this.socket;
+                await new Promise<void>((resolve) => {
+                    const timer = setTimeout(() => {
+                        sock.destroy();
+                        resolve();
+                    }, 2000);
+                    sock.once("close", () => {
+                        clearTimeout(timer);
+                        resolve();
+                    });
+                    sock.end();
+                });
+            }
         }
-        this.socket?.end();
         this.socket = null;
         for (const [stream_id, stream] of this.clientStreams) {
             stream.close();
         }
         this.clientStreams.clear();
-        if (this.proxyProcess) {
-            this.proxyProcess.kill();
-            this.proxyProcess = null;
-        }
     }
 
     private connectToProxy(host: string, port: number): Promise<boolean> {
         return new Promise((resolve) => {
             this.logInfo(`Attempting to connect to proxy on ${host}:${port}...`);
             const socket = new net.Socket();
+            // host is not always loopback -- WSL, Docker and SSH probe hosts make this a real
+            // network link, where Nagle plus the peer's delayed ACK stalls small writes.
+            socket.setNoDelay(true);
+            socket.setKeepAlive(true, PROXY_KEEPALIVE_MS);
             socket.once("connect", () => {
                 this.logInfo(`Successfully connected to proxy on ${host}:${port}`);
                 this.socket = socket;
@@ -302,13 +398,6 @@ export class ProxyClient extends EventEmitter {
                 socket.destroy();
                 resolve(false);
             });
-            /*
-            socket.once("timeout", () => {
-                socket.destroy();
-                resolve(false);
-            });
-            socket.setTimeout(1000);
-            */
             socket.connect(port, host);
             socket.on("data", (data: Buffer) => {
                 this.handleProxyData(data);
@@ -317,23 +406,9 @@ export class ProxyClient extends EventEmitter {
                 this.logInfo("Proxy connection closed");
                 this.stopHeartbeat();
                 this.socket = null;
+                this.failPendingCommands(new Error("Proxy connection closed"));
             });
         });
-    }
-
-    private async waitForProxyReady(host: string, port: number, timeoutMs: number, retryDelayMs: number): Promise<boolean> {
-        const deadline = Date.now() + timeoutMs;
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * 2));
-        while (true) {
-            if (await this.connectToProxy(host, port)) {
-                return true;
-            }
-            if (Date.now() > deadline) {
-                return false;
-            }
-            await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-        }
-        return false;
     }
 
     private streamStrToPortInfo: Map<string, PortReservedInfo> = new Map();
@@ -346,7 +421,7 @@ export class ProxyClient extends EventEmitter {
             this.clientPorts = ports;
             const portList = Object.keys(ports);
             const portSet: PortSet = {
-                start_port: 37000, // Just a random high port, proxy will find the actual free ports
+                start_port: DefaultPortBase.proxyRemote, // Only a hint; the proxy allocates on its own machine
                 port_ids: portList,
             };
             const portspec: PortAllocatorSpec = {
@@ -360,7 +435,7 @@ export class ProxyClient extends EventEmitter {
                 },
             };
             try {
-                const ret = (await awaitWithTimeout(this.sendControlCommand(cmd), this.timeout)) as any;
+                const ret = (await this.sendControlCommand(cmd)) as any;
                 const ports = ret?.allocatePorts?.ports;
                 for (const p of ports || []) {
                     const port = p as PortReserved;
@@ -380,22 +455,49 @@ export class ProxyClient extends EventEmitter {
         });
     }
 
-    async launchServer(executable: string, args: string[], serverCwd: string, regexes: RegExp[]): Promise<void> {
-        this.startHeartbeat();
+    /**
+     * Launch the gdb-server on the proxy.
+     *
+     * Deliberately takes no cwd. The server's working directory is always the
+     * session directory, which the proxy established at `initialize` and which is
+     * where `syncFiles` puts everything — so workspace-relative paths from
+     * launch.json resolve on the far side without rewriting. Letting a caller
+     * override it would break that, and the file sync along with it.
+     *
+     * A server with its own launch-directory requirement (ST-LINK_gdbserver has
+     * historically needed to run from its install dir so its libraries resolve) is a
+     * *different* concept and needs its own field — reusing this one would give the
+     * same name two meanings depending on server type.
+     *
+     * Output regexes are not sent either: the adapter matches them against the
+     * forwarded streams itself, in one place (see `server-session.ts`'s `matchRegex`).
+     */
+    async launchServer(executable: string, args: string[]): Promise<void> {
+        // No application-level heartbeat; TCP keepalive (set on the socket in connectToProxy)
+        // covers this instead, with empty segments that cost a long-running session nothing in
+        // the log.
+        //
+        // Unlike the serial manager, this connection cannot be rebuilt: a debug session holds a
+        // dozen streams whose ids would all have to be restored, and by the time the socket is
+        // gone the far end has usually killed the gdb-server anyway. So keepalive is here to
+        // *prevent* the loss -- keeping a NAT/tunnel mapping warm across a quiet session --
+        // rather than to detect it. Detection buys only an earlier, cleaner failure, which is
+        // also why a heartbeat would add little: knowing sooner does not make the session
+        // recoverable, and pending commands already fail on close.
+        //
+        // Opt-in reconnect was considered and deferred, with the conditions it would have to
+        // meet: docs-internal/Proxy-Connection-Loss.md.
         await this.syncFiles();
         const cmd: ControlMessage = {
             seq: this.nextSeq++,
             method: "startGdbServer",
             params: {
-                config_args: this.session.args,
                 server_path: executable,
                 server_args: args,
-                server_env: getEnvFromConfig(this.session.args),
-                // server_cwd: serverCwd,
-                server_regexes: regexes.map((r) => r.source),
+                server_env: processEnvForConfig(this.session.args),
             },
         };
-        return awaitWithTimeout(this.sendControlCommand(cmd), this.timeout);
+        return this.sendControlCommand(cmd);
     }
 
     private msgBuffer: Buffer = Buffer.alloc(0);
@@ -413,10 +515,10 @@ export class ProxyClient extends EventEmitter {
                 // Wait for the full message to arrive
                 break;
             }
-            const payload = this.msgBuffer.slice(5, 5 + length);
+            const payload = this.msgBuffer.subarray(5, 5 + length);
             await this.msgPromise;
             this.handleProxyMessage(stream_id, payload);
-            this.msgBuffer = this.msgBuffer.slice(5 + length);
+            this.msgBuffer = this.msgBuffer.subarray(5 + length);
         }
         this.proxyBufferBusy = false;
     }
@@ -471,11 +573,12 @@ export class ProxyClient extends EventEmitter {
             } else if (msg.seq && this.pendingPromises.has(msg.seq)) {
                 const { resolve, reject } = this.pendingPromises.get(msg.seq)!;
                 this.pendingPromises.delete(msg.seq);
-                this.logDebug(`Received response for seq ${msg.seq}: ${JSON.stringify(msg)}`);
+                // Outcome is logged once, by settle() in sendControlCommand -- it sees this
+                // path plus timeouts and dropped sockets, which never reach here.
                 if (msg.success) {
                     resolve(msg.data);
                 } else {
-                    reject(new Error(msg.error || "Unknown error from proxy"));
+                    reject(new Error(msg.message || "Unknown error from proxy"));
                 }
             } else {
                 this.logError(`Received response with unknown seq: ${msg.seq}`);
@@ -490,7 +593,10 @@ export class ProxyClient extends EventEmitter {
     }
 
     private handleGdbServerExited(pid: any, exit_code: any) {
-        this.emit("gdbServerExited", { pid, exit_code });
+        // Let any streams drain before we emit the serverExited event, so that the streams can be closed gracefully
+        setTimeout(() => {
+            this.emit("serverExited", { pid, exit_code });
+        }, 100);
     }
 
     private startHeartbeat() {
@@ -564,7 +670,7 @@ export class ProxyClient extends EventEmitter {
             this.pendingStreamStarts.set(curSeq, portReserved);
         }
         try {
-            const ret = await awaitWithTimeout(this.sendControlCommand(startStreamCmd), this.timeout);
+            const ret = await this.sendControlCommand(startStreamCmd);
             if (!ret || !ret.streamStatus || ret.streamStatus.status !== "Connected") {
                 throw new Error(`Failed to start stream for stream_id ${stream_id}, stream_name ${stream_name}`);
             }
@@ -606,7 +712,7 @@ export class RemoteServer {
         private proxyManager: ProxyClient,
         public portDef: TcpPortDef,
         public pInfo: PortReservedInfo,
-    ) {}
+    ) { }
 
     public async initialize() {
         const cleanupSocket = (socket: net.Socket) => {
@@ -619,6 +725,7 @@ export class RemoteServer {
         };
         this.server = net
             .createServer(async (socket) => {
+                socket.setNoDelay(true); // multiplexed serial/RTT/probe traffic: small, interactive writes
                 socket.on("close", () => {
                     cleanupSocket(socket);
                 });
@@ -671,7 +778,13 @@ export class RemoteServer {
                 this.proxyManager.logDebug(`Local server for stream ${this.pInfo.stream_id_str} is listening on port ${this.portDef.localPort}, forwarding to remote port ${this.pInfo.port}`);
                 this.proxyManager.emit("streamStarted", this.portDef);
             })
-            .listen(this.portDef.localPort);
+            // Loopback, explicitly. `listen(port)` with no host binds 0.0.0.0, which put the
+            // gdb-server's RSP, tcl and telnet endpoints on every interface -- tcl and telnet
+            // are full command channels, so that is remote control of the debug session to
+            // anything that can route here. Nothing legitimate needs them off-box: gdb runs on
+            // this machine by construction, and the far side is reached through the proxy's
+            // control socket, never through this listener.
+            .listen(this.portDef.localPort, "127.0.0.1");
     }
 
     private startStream(stream: RemoteStream, method: "startStream" | "duplicateStream" = "startStream"): Promise<boolean> {

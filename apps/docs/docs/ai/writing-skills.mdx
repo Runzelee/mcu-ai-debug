@@ -1,0 +1,33 @@
+---
+sidebar_position: 5
+title: Writing Skills and Prompts
+---
+
+import CodeBlock from '@theme/CodeBlock';
+import MyMarkdownSource from '!!raw-loader!/mcu-debug-fw/SKILL.md';
+
+# Writing Skills and Prompts
+
+## Overview
+
+A "skill" or "prompt" tells the AI how to use mcu-debug effectively. A well-written skill dramatically improves the AI's effectiveness as a debugging partner — it establishes protocol, sets expectations, and prevents common mistakes.
+
+## Minimal Skill Template
+
+:::warning
+This skill template is still in development and has not been tested. It is here conceptually and all the implementation is already there. However, details here may not be accurate.
+:::
+
+:::note
+Hardware-Specific Memory Accessibility
+
+While targets like STM32 generally allow live background memory reads seamlessly, others like PSoC (Infineon) hardware requires explicit GDB configuration to keep the bus open during active core execution. If your target gdb-server does not support standard non-stop/async execution out of the box, you must configure it via `postLaunchCommands` (see Troubleshooting below).
+:::
+
+For the frontmatter, you can put the entire `description` on one line if your agent/skill parser has trouble with a multi-line YAML string — but if you do, wrap it in single quotes. An unquoted YAML value ends at the first `: ` (colon-space), so an unquoted description containing a colon will fail to parse or be silently cut short. This is the single most common reason a skill "looks fine" but never loads.
+
+Save the template as `my-debug-skill/SKILL.md` (under `.claude/skills/` for Claude Code, `.github/skills` for GH Copilot). The `name` in the frontmatter must match the name of the parent directory to follow the [SKILL specification](https://agentskills.io/specification).
+
+[Visit/Download our SKILLS from our Repo](https://github.com/mcu-debug/mcu-debug/tree/main/packages/mcu-debug/support/skills)
+
+<CodeBlock language="markdown">{MyMarkdownSource}</CodeBlock>

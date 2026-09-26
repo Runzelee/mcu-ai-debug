@@ -1,4 +1,5 @@
 const { type } = require("node:os");
+const path = require("node:path");
 
 module.exports = {
     servertype: {
@@ -288,7 +289,7 @@ module.exports = {
         properties: {
             enabled: { default: true, description: "Enable/Disable entire set of chained configurations", type: "boolean" },
             detached: { default: false, description: "Related or independent server sessions.", type: "boolean" },
-            lifecycleManagedByParent: { default: true, description: "Are Restart/Reset/Stop/Disconnect shared?", type: "boolean" },
+            lifecycleManagedByParent: { default: true, description: "Are Reset/Stop/Disconnect shared?", type: "boolean" },
             waitOnEvent: { enum: ["postStart", "postInit"], default: "postInit", description: "Event to wait for.", type: "string" },
             delayMs: { type: "number", description: "Default delay in milliseconds.", multipleOf: 1, minimum: 0, default: 5 },
             overrides: { default: {}, description: "Values to override/set in this child configuration.", type: "object" },
@@ -303,7 +304,7 @@ module.exports = {
                         detached: { default: false, description: "Related or independent server sessions.", type: "boolean" },
                         waitOnEvent: { enum: ["postStart", "postInit"], default: "postInit", description: "Wait for an event.", type: "string" },
                         delayMs: { type: "number", description: "Delay in milliseconds.", multipleOf: 1, minimum: 0, default: 5 },
-                        lifecycleManagedByParent: { default: true, description: "Are Restart/Reset/Stop/Disconnect shared?", type: "boolean" },
+                        lifecycleManagedByParent: { default: true, description: "Are Reset/Stop/Disconnect shared?", type: "boolean" },
                         overrides: { default: {}, description: "Values to override/set in this child configuration.", type: "object" },
                         inherits: { default: [], description: "List of properties to inherit from parent.", type: "array", items: { type: "string" } },
                     },
@@ -365,6 +366,7 @@ module.exports = {
             ],
         },
     },
+    routeGdbServerOutputToDebugConsole: { type: "boolean", default: false, description: "Route GDB server output to debug console" },
     debugFlags: {
         description: "Debug flags to debug this extension (mcu-debug); Causes additional output in Debug Console.",
         type: "object",
@@ -392,8 +394,26 @@ module.exports = {
         description: "This is for 'XPERIPHERALS' window provided by 'mcu-debug.peripheral-viewer' and 'Embedded Tools' Extension from Microsoft.",
         type: "string",
     },
-    hostConfig: {
+    cliOptions: {
         type: "object",
+        description:
+            "Options for the CLI output window (the 'Cockpit' or 'TUI' or 'Console'). These are not related " +
+            "to the GDB Server or GDB command line options, but rather options for how the CLI debugger displays " +
+            "the output from the debug session.",
+        properties: {
+            logFile: {
+                type: ["string", "null"],
+                default: ".mcu-debug/cli.log",
+                description:
+                    "Set the log file for the CLI output window (the 'Cockpit/TUI/Console', Setting to null disables logging). " +
+                    "Command-line option overrides this setting if specified. Cannot use ${xxx} substitutions in the path because " +
+                    "the CLI will use this path before it can perform substitutions, so the path is taken as-is. Absolute or relative " +
+                    "to $cwd pf the CLI program.",
+            },
+        },
+    },
+    hostConfig: {
+        type: ["object", "boolean"],
         description:
             "Enables remote probe support. When present, the gdb-server runs on a host machine that has the USB debug probe attached. " +
             "Omit this entirely for local debugging (the common case). " +
@@ -404,7 +424,7 @@ module.exports = {
         properties: {
             enabled: {
                 type: "boolean",
-                default: false,
+                default: true,
                 description: "Enable/Disable remote probe support. When true, the gdb-server runs on a host machine that has the USB debug probe attached.",
             },
             type: {
@@ -413,14 +433,87 @@ module.exports = {
                 description:
                     '"auto": extension detects the VS Code remote environment and constructs the correct proxy address automatically. ' +
                     "Covers WSL (NAT and Mirrored), Dev Containers, VS Code Remote SSH, and plain local. " +
-                    '"ssh": explicit SSH to a separate probe host; requires sshHost.',
+                    '"ssh": explicit SSH to a separate probe host; requires the `ssh` object below.',
             },
-            sshHost: {
-                type: "string",
+            ssh: {
+                type: "object",
+                additionalProperties: false,
+                required: ["host"],
                 description:
-                    'SSH host for type "ssh". Resolved via ~/.ssh/config, so host aliases, port, jump hosts, and keys are all handled there. ' +
-                    'Example: "user@lab-server" or an alias defined in ~/.ssh/config.',
-                default: "mylogin@myserver",
+                    'Settings for `type: "ssh"` — the probe is on a separate machine reached over SSH. ' +
+                    "Ignored for every other type. Grouping them keeps the SSH-only knobs together and lets " +
+                    "the schema require a host whenever any of them is set.",
+                properties: {
+                    host: {
+                        type: "string",
+                        description:
+                            "SSH host, resolved via ~/.ssh/config — so aliases, port, jump hosts and keys are all handled there. " +
+                            'Example: "user@lab-server", or an alias defined in ~/.ssh/config.',
+                        default: "mylogin@myserver",
+                    },
+                    proxyPort: {
+                        type: "number",
+                        multipleOf: 1,
+                        minimum: 1024,
+                        maximum: 65535,
+                        description:
+                            "Daemon mode: the port a Probe Agent is *already* listening on at the SSH host. " +
+                            "When set, the extension connects to that agent instead of launching one, and the SSH -L tunnel " +
+                            "is established from an OS-assigned local port to this one. " +
+                            "When omitted, a new Probe Agent is launched per debug session and its port read from the Discovery JSON. " +
+                            "Set this when the agent is started manually or managed by a system service on the probe host.",
+                    },
+                    token: {
+                        type: "string",
+                        description:
+                            "Authentication token of the pre-running agent named by `proxyPort`. Required with `proxyPort`, " +
+                            "since an agent we did not launch has a token we cannot know. Ignored otherwise — an agent we launch " +
+                            "is given a freshly generated token. " +
+                            'Prefer "${env:MDBG_PROXY_TOKEN}" over a literal: a token committed to source control is a shared ' +
+                            "secret in your repository, and the agent reads the same variable.",
+                    },
+                    serverPath: {
+                        type: "string",
+                        description:
+                            'Path to a pre-installed mcu-debug binary on the SSH host (e.g. "/usr/local/bin/mcu-debug"). ' +
+                            "When set, the extension skips deploying the binary and launches this path directly. " +
+                            "Use it when the host has the tool installed already, or when writing to ~/.mcu-debug/bin is not permitted.",
+                    },
+                },
+            },
+            proxy: {
+                type: "object",
+                additionalProperties: false,
+                required: ["host", "port", "token"],
+                description:
+                    "Connect to a Probe Agent you started yourself, instead of detecting the topology and launching one. " +
+                    "When present, no auto-detection, no launching, and no SSH tunnel: the extension connects directly to host:port with token. " +
+                    "Use it for a CLI-only container, a CI runner, a shared lab machine, or any setup where the agent's lifetime is managed outside the editor. " +
+                    "All three fields are required — an endpoint without a token is rejected at the agent, which surfaces much later and is hard to diagnose. " +
+                    "Not for SSH topologies: 'ssh' needs its -L tunnel established first, and Remote-SSH needs its reverse tunnel, so use `ssh.proxyPort` for a pre-running agent there.",
+                properties: {
+                    host: {
+                        type: "string",
+                        description:
+                            "Address the debug adapter should dial to reach the Probe Agent, from wherever the adapter runs. " +
+                            'Examples: "127.0.0.1" for the same machine, "host.docker.internal" from a Docker Desktop container, or a WSL gateway / LAN address. ' +
+                            "Must be an address the agent is actually bound to — check with `mcu-debug proxy --status` and look at `hosts`.",
+                    },
+                    port: {
+                        type: "number",
+                        multipleOf: 1,
+                        minimum: 1024,
+                        maximum: 65535,
+                        description: "Port the Probe Agent is listening on. Shown as `port` in `mcu-debug proxy --status`.",
+                    },
+                    token: {
+                        type: "string",
+                        description:
+                            "Authentication token the agent was started with. " +
+                            'Prefer "${env:MDBG_PROXY_TOKEN}" over a literal — a token committed to source control is a shared secret in your repository. ' +
+                            "The agent reads the same MDBG_PROXY_TOKEN variable, so one export configures both ends.",
+                    },
+                },
             },
             syncFiles: {
                 type: "array",
@@ -435,20 +528,103 @@ module.exports = {
                 },
                 default: [],
             },
-            token: {
-                type: "string",
-                description:
-                    "Override the token used to authenticate with the Probe Agent. " +
-                    "Only needed for daemon mode when the token file (~/.mcu-debug/agent.token) is not accessible, " +
-                    "or when a fixed lab-policy token is preferred. " +
-                    "When omitted, the extension auto-manages the token: it generates one for extension-launched agents, " +
-                    "or reads it from the token file for pre-running daemons. " +
-                    "Do NOT commit this value to source control — use VS Code user settings or a secrets manager.",
-            },
         },
         default: {
             enabled: true,
             type: "auto",
+        },
+    },
+    serialConfig: {
+        enabled: {
+            type: "boolean",
+            default: false,
+            description: "Enable/Disable serial port bridging. When enabled, the extension creates TCP bridges to physical serial ports for easy access to serial output from the target device.",
+        },
+        ports: {
+            type: "array",
+            description: "List of serial port bridges to expose as TCP ports. Each entry maps a physical serial device to a TCP port that can be connected to for bidirectional communication.",
+            items: {
+                type: "object",
+                properties: {
+                    path: {
+                        type: "string",
+                        description: "Serial device path or glob. E.g. /dev/ttyUSB0, /dev/tty.usbserial-*, COM3, /dev/serial/by-id/usb-*. Optional if serial or vid/pid are specified.",
+                    },
+                    match: {
+                        type: "string",
+                        description:
+                            "Case-insensitive substring matched against the port's description as reported by the OS (e.g. 'STM32 STLink', 'FTDI'). Used for selection, along with path, serial, or vid/pid. Use 'label' to name the port in the UI.",
+                    },
+                    serial: {
+                        type: "string",
+                        description: "USB serial number. Stable across reconnects and reboots — preferred in lab environments with multiple boards of the same type.",
+                    },
+                    vid: {
+                        type: "string",
+                        description: 'USB vendor ID in hex (e.g. "0x0483"). Used with pid to identify the device type when serial is unavailable.',
+                    },
+                    pid: {
+                        type: "string",
+                        description: 'USB product ID in hex (e.g. "0x374b"). Used with vid to identify the device type when serial is unavailable.',
+                    },
+                    baud_rate: {
+                        type: "number",
+                        multipleOf: 1,
+                        minimum: 300,
+                        default: 115200,
+                        description: "Baud rate in bits per second.",
+                    },
+                    data_bits: {
+                        type: "number",
+                        enum: [5, 6, 7, 8],
+                        default: 8,
+                        description: "Number of data bits per frame.",
+                    },
+                    stop_bits: {
+                        type: "string",
+                        enum: ["one", "one_point_five", "two"],
+                        default: "one",
+                        description: "Number of stop bits.",
+                    },
+                    parity: {
+                        type: "string",
+                        enum: ["none", "odd", "even"],
+                        default: "none",
+                        description: "Parity checking mode.",
+                    },
+                    flow_control: {
+                        type: "string",
+                        enum: ["none", "software", "hardware"],
+                        default: "none",
+                        description: 'Flow control mode. "software" = XON/XOFF, "hardware" = RTS/CTS.',
+                    },
+                    log_file: {
+                        type: "string",
+                        default: "",
+                        description: "Optional file path to log all serial data (both input and output). If not set, no logging is performed.",
+                    },
+                    input_mode: {
+                        type: "string",
+                        enum: ["raw", "cooked"],
+                        default: "cooked",
+                        description:
+                            'Input mode for data sent to the serial port. "raw" = send as-is, immediately, "cooked" = buffer input until Enter is pressed and perform basic line editing (backspace, Ctrl+U to clear line).',
+                    },
+                    label: {
+                        type: "string",
+                        description: "A label for this serial port bridge, used in the extension UI to identify it. E.g. 'Debug UART'. Optional but recommended when multiple ports are configured.",
+                    },
+                },
+            },
+        },
+        default: {
+            enabled: true,
+            ports: [
+                {
+                    path: "/dev/ttyUSB0 (or COM3 on Windows)",
+                    baud_rate: 115200,
+                },
+            ],
         },
     },
     rttConfig: {
@@ -466,7 +642,7 @@ module.exports = {
             searchSize: { type: "number", description: "Number of bytes to search for the RTT control block.", multipleOf: 1, minimum: 16, default: 16 },
             searchId: { type: "string", description: "A string to search for to find the RTT control block.", default: "SEGGER RTT" },
             useBuiltinRTT: {
-                type: "object",
+                type: ["boolean", "object"],
                 description:
                     "Use the built-in RTT support (recommended) especially with servers no native RTT support. If false, use gdb-server's RTT support, which may have better performance, but harder to setup.",
                 properties: {
@@ -474,7 +650,7 @@ module.exports = {
                     hostName: { type: "string", description: "Host name to use for built-in RTT server.", default: "127.0.0.1" },
                     tcpPort: {
                         type: ["number", "null"],
-                        description: "Fixed port number to use for built-in RTT server. If not set, a free port is chosen automatically.",
+                        description: "Optional fixed port number to use for built-in RTT server. If not set, a free port is chosen automatically.",
                         default: null,
                         minimum: 1024,
                         maximum: 65535,

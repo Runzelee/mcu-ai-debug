@@ -1,0 +1,95 @@
+---
+sidebar_position: 1
+title: CLI Tool Overview
+---
+
+# CLI Tool Overview
+
+## Overview
+
+The mcu-debug CLI tool provides the full debug experience outside of VS Code. Same `launch.json`, same gdb-server support, same RTT/UART tracing — just without the VS Code UI.
+
+The CLI is the foundation for AI-assisted debugging and for headless workflows like CI/CD hardware-in-the-loop testing.
+
+## Three Modes
+
+```
+                          ┌───────────────────────────────┐
+                          │      MCU-Debug Core Engine    │
+                          │   (DAP-Based, Rust-Powered)   │
+                          └───────────────┬───────────────┘
+                                          │
+                 ┌────────────────────────┼────────────────────────┐
+                 ▼                        ▼                        ▼
+          [ IDE Surface ]          [ TUI Surface ]        [ Terminal Surface ]
+        VS Code Native Panel     ratatui Interactive       Raw stdout Streams
+        (via webview xterm.js)    Terminal Dashboard      (for CI/CD & AI Agents)
+```
+DAP is **Debug Adapter Protocol**. TUI is **Terminal User Interface**. The CLI automatically selects a mode based on the environment:
+
+| Mode          | Condition / stdout                           | How                                                    |
+| ------------- | -------------------------------------------- | ------------------------------------------------------ |
+| Terminal      | stdout is not a TTY, or `--no-tui` is passed | Raw terminal, readline input, plain text tagged output |
+| TUI           | stdout is a TTY (default)                    | ratatui-based full-screen terminal UI                  |
+| VS Code panel | Running inside VS Code                       | AI Cockpit WebviewPanel with xterm.js rendering        |
+
+**Auto-detection**: if stdout is a TTY, TUI mode starts automatically, unless disabled by `--no-tui`. If stdout is redirected (to a pipe, file, or AI subprocess), terminal mode activates instead of TUI. Running inside VS Code activates the VS Code panel mode - this panel can be found inside the `MCU Debug` panel alongside `Terminal`, `Debug Console`, etc.
+
+## Installation
+
+The CLI tools are bundled directly with the VS Code extension. To install the wrapper script and make the `mcu-debug` command available globally in your PATH:
+
+1. Open VS Code.
+2. Open the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
+3. Execute the **MCU-Debug: Install CLI Tools** command.
+4. Follow the interactive prompts in the terminal to automatically append `~/.mcu-debug/bin` to your shell profile or environment `PATH`.
+
+Alternately, you can add `~/.mcu-debug/bin` to your $PATH environment variable yourself
+
+:::note
+You have to restart your VSCode and Terminal Windows for $PATH changes to take effect
+:::
+
+**Requirements**: Node.js >= 22 installed on your system. The VS Code extension itself must be installed and active. The CLI delegates all debug adapter operations to the binaries bundled within the extension folder.
+
+## Starting a Session
+
+```sh
+# By configuration name
+mcu-debug debug -c "Launch PSoC6 CM4"
+
+# By index in launch.json (only 'mcu-debug' type configs are counted)
+mcu-debug debug -c 0
+
+# With explicit launch.json path
+mcu-debug debug -c "Launch PSoC6 CM4" -j /path/to/launch.json
+
+# Force terminal mode (no TUI)
+mcu-debug debug -c "My Config" --no-tui
+```
+
+## Session Discovery
+
+Running sessions are discoverable:
+
+```sh
+# List all active sessions (not yet implemented)
+mcu-debug list
+
+# Attach to a session (auto-discovers from .mcu-debug/sock.json)
+mcu-debug attach
+
+# Attach to a specific session by socket path
+mcu-debug attach [-s /path/to/session.sock]
+```
+
+Sessions write a `sock.json` file to `.mcu-debug/` in the workspace directory. This file contains the socket path (or named pipe in Windows) and session metadata.
+
+## Documentation
+
+| Topic                                               | Description                                                      |
+| --------------------------------------------------- | ---------------------------------------------------------------- |
+| [Configuration Outside VS Code](./configuration.md) | Using launch.json standalone, variable resolution, `dump-config` |
+| [Terminal Mode](./terminal-mode.md)                 | Raw output mode for pipes, AI tools, and CI                      |
+| [TUI Mode](./tui-mode.md)                           | Full-screen ratatui interface                                    |
+| [VS Code Panel](./vscode-panel.md)                  | AI Cockpit WebviewPanel inside VS Code                           |

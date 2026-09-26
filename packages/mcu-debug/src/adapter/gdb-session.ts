@@ -1,34 +1,32 @@
 import { DebugProtocol } from "@vscode/debugprotocol";
 import { SeqDebugSession } from "./seq-debug-session";
-import { Config } from "winston/lib/winston/config";
-import { InitializedEvent, Logger, logger, OutputEvent, Variable, TerminatedEvent } from "@vscode/debugadapter";
-import { ConfigurationArguments, RTTCommonDecoderOpts, CustomStoppedEvent, GenericCustomEvent, SymbolFile, defSymbolFile, canonicalizePath, SWOConfigureEvent } from "./servers/common";
+import { ErrorDestination, InitializedEvent, Logger, logger, OutputEvent, Variable, TerminatedEvent } from "@vscode/debugadapter";
+import { ConfigurationArguments, RTTCommonDecoderOpts, CustomStoppedEvent, GenericCustomEvent, SymbolFile, defSymbolFile, canonicalizePath, SWOConfigureEvent, PostInitializedEvent } from "./servers/common";
 import os from "os";
 import fs from "fs";
 import path from "path";
 import hasbin from "hasbin";
 import { GdbInstance } from "./gdb-mi/gdb-instance";
 import { Console, GdbEventNames, GdbMiFrameIF, GdbMiOutput, GdbMiRecord, GdbMiThreadIF, Stderr, Stdout } from "./gdb-mi/mi-types";
-import { SWODecoderConfig } from "../frontend/swo/common";
 import { GdbOutputMsgContainer, GdbOutputStoreage, VariableManager } from "./variables";
 import { SymbolTable } from "./symbols";
 import { GDBServerSession } from "./server-session";
 import { GdbMiThreadInfoList, MiCommands, parseStoppedThreadInfo } from "./gdb-mi/mi-commands";
 import { SessionMode } from "./servers/common";
-import { formatAddress, parseAddress, parseAddrVal } from "../frontend/utils";
+import { formatAddress, parseAddrVal } from "../common/utils";
 import { BreakpointManager } from "./breakpoints";
 import { LiveWatchMonitor } from "./live-watch-monitor";
 import { MemoryRequests } from "./memory";
-import { ServerConsoleLog } from "./server-console-log";
 import { gitCommitHash, pkgJsonVersion } from "../commit-hash";
 import { ScopeMask, VariableScope, getScopeFromReference, getVariableClass } from "./var-scopes";
-import { RegisterClientResponse, SetExpressionLiveResponse, SetVariableLiveResponse } from "./custom-requests";
+import { RegisterClientResponse, SetExpressionLiveResponse, SetVariableLiveResponse, UnregisterClientResponse, LiveWatchClientReadyResponse } from "./custom-requests";
 import { TargetInfo } from "./target-info";
 import { RttBufferManager, RttTcpServer } from "./rtt-builtin";
-import { TcpPortScanner } from "@mcu-debug/shared";
+import { TcpPortScanner, formatThrown } from "@mcu-debug/shared";
 import { DisassemblyAdapter } from "./disassebly-gdb";
 import { DebugHelper, withTimeout } from "./helper";
 import { DisassemblyAdapterNew } from "./disassembly-new";
+import { SWODecoderConfig } from "../common/swo/common";
 
 export const RustDebugHelperEnabled = true;
 
@@ -63,9 +61,10 @@ export class GDBDebugSession extends SeqDebugSession {
     public fileMap: Map<string, number> = new Map();
     private swoLaunchPromise = Promise.resolve();
     private swoLaunched = false;
-    private disassemblyAdapter: DisassemblyAdapter;
+    private disassemblyAdapter: DisassemblyAdapter | undefined = undefined;
     private disassemblyAdapterNew: DisassemblyAdapterNew;
     public debugHelper: DebugHelper;
+    private restarting = false;
 
     protected varManager: VariableManager;
     protected bkptManager: BreakpointManager;
@@ -75,6 +74,7 @@ export class GDBDebugSession extends SeqDebugSession {
 
     constructor() {
         super();
+        this.restarting = false;
         SessionCounter++;
         this.gdbInstance = new GdbInstance();
         this.gdbInstance.currentCommandTimeout = 0; // Disable timeouts by default until after launch/attach
@@ -90,7 +90,7 @@ export class GDBDebugSession extends SeqDebugSession {
         this.rttTcpServer = new RttTcpServer(this);
         this.rttManager = new RttBufferManager(this.liveWatchMonitor);
         this.debugHelper = new DebugHelper(this);
-        this.disassemblyAdapter = new DisassemblyAdapter(this);
+        // this.disassemblyAdapter = new DisassemblyAdapter(this);
         this.disassemblyAdapterNew = new DisassemblyAdapterNew(this);
     }
 
@@ -119,23 +119,31 @@ export class GDBDebugSession extends SeqDebugSession {
         return this.continuing || this.isRunning();
     }
 
-    public handleErrResponse(response: DebugProtocol.Response, msg: string, message?: DebugProtocol.Message): void {
+    public handleErrResponse(response: DebugProtocol.Response, msg: string, message?: DebugProtocol.Message, noLog?: boolean, showUser: boolean = true): void {
         if (!msg.startsWith("mcu-debug")) {
             msg = "mcu-debug: " + msg;
         }
-        this.handleMsg(GdbEventNames.Stderr, msg + "\n");
-        this.sendErrorResponse(response, message ?? 1, msg);
+        if (!noLog) {
+            this.handleMsg(GdbEventNames.Stderr, msg + "\n");
+        }
+        // showUser=false avoids a popup notification for every failure (e.g. high-frequency memory reads from other extensions)
+        this.sendErrorResponse(response, message ?? 1, msg, undefined, showUser ? ErrorDestination.User : ErrorDestination.Telemetry);
     }
-    public handleResponseMsg(response: DebugProtocol.Response, msg: string, message?: DebugProtocol.Message): void {
-        if (!msg.startsWith("mcu-debug")) {
-            msg = "mcu-debug: " + msg;
+    public handleResponseMsg(response: DebugProtocol.Response, msg: string): void {
+        if (msg && this.args.debugFlags.anyFlags) {
+            if (!msg.startsWith("mcu-debug")) {
+                msg = "mcu-debug: " + msg;
+            }
+            this.handleMsg(GdbEventNames.Stderr, msg);
         }
-        this.handleMsg(GdbEventNames.Stderr, msg + "\n");
         this.sendResponse(response);
     }
-    public busyError(response: DebugProtocol.Response, args: any) {
+    public busyError(response: DebugProtocol.Response, reqOrArgs: any, noLog: boolean) {
         response.message = "notStopped";
-        this.handleErrResponse(response, "Target is running. Cannot process request now.", { id: 2, format: "Busy" });
+        this.handleErrResponse(
+            response, "Target is running. Request rejected: " + JSON.stringify(reqOrArgs),
+            { id: 2, format: response.message },
+            noLog);
     }
     protected initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): void {
         response.body = response.body || {};
@@ -165,6 +173,12 @@ export class GDBDebugSession extends SeqDebugSession {
         response.body.supportsReadMemoryRequest = true;
         response.body.supportsWriteMemoryRequest = true;
 
+        // Not a standard DAP capability. Signals to other extensions (memory/SVD/RTOS viewers, etc.)
+        // that this adapter has the registerClient/*Live custom-request family for live polling
+        // while running. Consumers need a DebugAdapterTracker to see this; checking
+        // `session.type === "mcu-debug"` is simpler and just as reliable for now.
+        (response.body as any).supportsLiveUpdates = true;
+
         this.sendResponse(response);
     }
 
@@ -183,7 +197,9 @@ export class GDBDebugSession extends SeqDebugSession {
             // Delay just a bit to allow any pending events/messages to be sent
             setTimeout(() => {
                 this.sendResponse(response);
-                this.sendEvent(new TerminatedEvent());
+                if (!this.restarting) {
+                    this.sendEvent(new TerminatedEvent());
+                }
             }, 20);
         };
         if (this.endSession) {
@@ -191,6 +207,9 @@ export class GDBDebugSession extends SeqDebugSession {
             return;
         }
         try {
+            if (this.args.debugFlags.anyFlags) {
+                this.handleMsg(Stdout, `Client (vscode?) requested end of debug session: ${JSON.stringify(args)}\n`);
+            }
             TcpPortScanner.PortAllocated.removeListener("allocated", this.tcpPortAllocatedListener);
             setTimeout(() => {
                 TcpPortScanner.unlockPortsIfFree(Array.from(this.allPorts));
@@ -198,25 +217,23 @@ export class GDBDebugSession extends SeqDebugSession {
 
             this.endSession = true;
             const doTerminate = !!args.terminateDebuggee;
-            const doContinue = !doTerminate && !args.suspendDebuggee;
+            const doDetach = !doTerminate && !args.suspendDebuggee;
             this.debugHelper.dispose();
             this.rttManager.dispose();
             this.suppressStoppedEvents = true;
             if (this.liveWatchMonitor.enabled()) {
                 await this.liveWatchMonitor.stop();
-                await new Promise((resolve) => setTimeout(resolve, 50));
-            }
-            if (this.args.debugFlags.anyFlags) {
-                this.handleMsg(Stdout, `Client requested end of debug session: ${JSON.stringify(args)}\n`);
+                await new Promise((resolve) => setTimeout(resolve, 50)); // Just to ensure all pending events from the live watch monitor are processed before we stop the GDB instance
             }
             if (this.gdbInstance) {
                 if (this.isRunning()) {
                     try {
-                        // GDB must halt the target before deleting breakpoints or running end commands.
+                        // We need to pause to delete braokpoints and detach cleanly and to issue other commands.
+                        // gdb doesnt accept many commnds unless target is halted
                         await this.gdbInstance.sendCommand("-exec-interrupt", 100);
-                        await this.waitForCompletion(5, () => !this.isRunning(), 5);
+                        await this.waitForCompletion(5, () => !this.isRunning(), 5); // Yield to node to get all events out
                         if (this.isRunning()) {
-                            this.handleMsg(Stderr, "Target is still running after an interrupt; continuing session cleanup.\n");
+                            this.handleMsg(Stderr, "Target is still running during disconnect despite issuing an 'interrupt' command, continuing trying to end session...\n");
                         }
                     } catch (e) {
                         // Ignore errors
@@ -239,25 +256,30 @@ export class GDBDebugSession extends SeqDebugSession {
                     await new Promise((resolve) => setTimeout(resolve, 50));
                 }
 
-                if (doContinue) {
+                if (doDetach && false) {
+                    // If we do a continue, we cannot do a detach as gdb forbids that. It is the
+                    // gdb-servers responsibility to continue running the target after a detach.
+                    // But, if we do a continue, we cannot do a detach as gdb forbids that. It is the
+                    // gdb-servers responsibility to continue running the target after a detach.
                     try {
                         await this.gdbInstance.sendCommand("-exec-continue", 200);
                         await this.waitForCompletion(5, () => this.isRunning(), 5);
                         if (!this.isRunning()) {
-                            this.handleMsg(Stderr, "Target is not running despite issuing a continue command.\n");
+                            this.handleMsg(Stderr, "Target is not running despite issuing a 'continue' command...\n");
                         }
-                    } catch (e) {
+                    } catch (e: any) {
                         this.handleMsg(Stderr, "Error continuing target before exit: " + (e ? e.toString() : "Unknown error") + "\n");
                     }
                 }
 
                 try {
                     // Give GDB a chance to detach nicely, but don't wait forever
-                    if (doContinue) {
+                    if (doDetach) {
                         await this.gdbInstance.sendCommand("-target-detach", 250);
-                    } else {
-                        await this.gdbInstance.sendCommand("-target-disconnect", 250);
                     }
+                    // ask gdb to disconnect from the server (drops RSP connection). This can
+                    // cause the target to exit unless the user asked for a persistent connection
+                    await this.gdbInstance.sendCommand("-target-disconnect", 250);
                 } catch (e) {
                     // Ignore errors
                 }
@@ -269,6 +291,7 @@ export class GDBDebugSession extends SeqDebugSession {
             }
 
             if (this.serverSession) {
+                await new Promise((resolve) => setTimeout(resolve, 100)); // Small delay to allow any pending server operations to complete
                 await this.serverSession.stopServer();
                 // @ts-ignore
                 this.serverSession = null;
@@ -313,9 +336,16 @@ export class GDBDebugSession extends SeqDebugSession {
         };
         await this.finishSession(response, newArgs);
     }
-    protected restartRequest(response: DebugProtocol.RestartResponse, args: DebugProtocol.RestartArguments, request?: DebugProtocol.Request): void {
-        this.sendResponse(response);
+    protected async restartRequest(response: DebugProtocol.RestartResponse, args: DebugProtocol.RestartArguments, request?: DebugProtocol.Request): Promise<void> {
+        // This is never called by external clients. It is however called by our CLI session driver when the user requests a restart from the CLI.
+        // We don't do it for the VSCode session because VSCode itself will just terminate the current session and start a new one, so there is
+        // no need for us to do anything special here. But for the CLI, we want to reuse the same session and just restart it internally. So, we
+        // need to clean up everything and get ready for a new launch/attach sequence. VSCode builtin may also run a preLaunchTask so the semantics
+        // are not clear
+        this.restarting = true;
+        await this.finishSession(response, { terminateDebuggee: true });
     }
+
     protected async setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments, request?: DebugProtocol.Request): Promise<void> {
         try {
             response.body = { breakpoints: [] };
@@ -356,7 +386,7 @@ export class GDBDebugSession extends SeqDebugSession {
     }
     protected async continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments, request?: DebugProtocol.Request): Promise<void> {
         if (this.isBusy()) {
-            this.handleErrResponse(response, "Continue request received while target is running.");
+            this.busyError(response, request || args, false);
             return;
         }
         await this.clearForContinue();
@@ -404,7 +434,7 @@ export class GDBDebugSession extends SeqDebugSession {
                 this.handleErrResponse(response, `StepOut request failed: ${e}`);
             });
     }
-    protected stepBackRequest(response: DebugProtocol.StepBackResponse, args: DebugProtocol.StepBackArguments, request?: DebugProtocol.Request): void {}
+    protected stepBackRequest(response: DebugProtocol.StepBackResponse, args: DebugProtocol.StepBackArguments, request?: DebugProtocol.Request): void { }
     protected reverseContinueRequest(response: DebugProtocol.ReverseContinueResponse, args: DebugProtocol.ReverseContinueArguments, request?: DebugProtocol.Request): void {
         this.sendResponse(response);
     }
@@ -452,8 +482,7 @@ export class GDBDebugSession extends SeqDebugSession {
     protected async stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments, request?: DebugProtocol.Request): Promise<void> {
         response.body = { stackFrames: [], totalFrames: 0 };
         if (this.isBusy()) {
-            this.handleMsg(GdbEventNames.Stderr, "mcu-debug: StackTrace request received while target is running. Returning empty stack trace.\n");
-            this.sendResponse(response);
+            this.handleResponseMsg(response, "mcu-debug: StackTrace request received while target is running. Returning empty stack trace.\n");
             return;
         }
         const addFrame = (frame: GdbMiFrameIF, threadId: number): void => {
@@ -579,7 +608,7 @@ export class GDBDebugSession extends SeqDebugSession {
             return;
         }
         if (this.isBusy()) {
-            this.handleErrResponse(response, "Variables request received while target is running.");
+            this.busyError(response, request || args, false);
             return;
         }
         try {
@@ -592,7 +621,7 @@ export class GDBDebugSession extends SeqDebugSession {
     }
     protected async setVariableRequest(response: DebugProtocol.SetVariableResponse, args: DebugProtocol.SetVariableArguments, request?: DebugProtocol.Request): Promise<void> {
         if (this.isBusy()) {
-            this.handleErrResponse(response, "SetVariable request received while target is running.");
+            this.busyError(response, request || args, false);
             return;
         }
         try {
@@ -604,7 +633,7 @@ export class GDBDebugSession extends SeqDebugSession {
     }
     protected async setExpressionRequest(response: DebugProtocol.SetExpressionResponse, args: DebugProtocol.SetExpressionArguments, request?: DebugProtocol.Request): Promise<void> {
         if (this.isBusy()) {
-            this.handleErrResponse(response, "SetExpression request received while target is running.");
+            this.busyError(response, request || args, false);
             return;
         }
         try {
@@ -616,7 +645,8 @@ export class GDBDebugSession extends SeqDebugSession {
     }
     protected async evaluateRequest(response: DebugProtocol.EvaluateResponse, args: DebugProtocol.EvaluateArguments, request?: DebugProtocol.Request): Promise<void> {
         if (this.isBusy() && args.context !== "repl") {
-            this.handleErrResponse(response, "Evaluate request received while target is running.");
+            // Supress logging to console for busy error in this context, hover causes too much noise (used by client extensions)
+            this.busyError(response, request || args, true); // noLog set to true
             return;
         }
         response.body = {
@@ -631,7 +661,8 @@ export class GDBDebugSession extends SeqDebugSession {
                 this.sendResponse(response);
             }
         } catch (e) {
-            this.handleErrResponse(response, `Evaluate request failed for '${args.expression}': ${e}`);
+            // Non-repl evaluates (hover, watch, RTOS/other extensions probing symbols) fail routinely and shouldn't toast
+            this.handleErrResponse(response, `Evaluate request failed for '${args.expression}': ${e}`, undefined, undefined, args.context === "repl");
         }
     }
     private async evalRepl(expr: string, response: DebugProtocol.EvaluateResponse): Promise<void> {
@@ -641,6 +672,7 @@ export class GDBDebugSession extends SeqDebugSession {
             continue: "-exec-continue",
             c: "-exec-continue",
             cont: "-exec-continue",
+            /*
             step: "-exec-step",
             s: "-exec-step",
             next: "-exec-next",
@@ -651,6 +683,7 @@ export class GDBDebugSession extends SeqDebugSession {
             b: "-break-insert",
             run: "-exec-run",
             r: "-exec-run",
+            */
         };
         const isLiveCmd = expr.startsWith("+");
         if (isLiveCmd) {
@@ -665,7 +698,7 @@ export class GDBDebugSession extends SeqDebugSession {
         if (!expr.startsWith("-")) {
             expr = `-interpreter-exec console "${expr}"`;
         }
-        this.handleMsg(Stdout, `${expr}\n`);
+        // this.handleMsg(Stdout, `${expr}\n`);
         const gdbInstance = isLiveCmd ? this.liveWatchMonitor.gdbInstance : this.gdbInstance;
         await gdbInstance!
             .sendCommand(expr)
@@ -765,7 +798,7 @@ export class GDBDebugSession extends SeqDebugSession {
 
     protected async readMemoryRequest(response: DebugProtocol.ReadMemoryResponse, args: DebugProtocol.ReadMemoryArguments, request?: DebugProtocol.Request): Promise<void> {
         if (this.isBusy()) {
-            this.busyError(response, args);
+            this.busyError(response, request || args, false);
             return;
         }
         await this.memoryRequests.readMemoryRequest(response, args);
@@ -773,7 +806,7 @@ export class GDBDebugSession extends SeqDebugSession {
 
     protected async writeMemoryRequest(response: DebugProtocol.WriteMemoryResponse, args: DebugProtocol.WriteMemoryArguments, request?: DebugProtocol.Request): Promise<void> {
         if (this.isBusy()) {
-            this.busyError(response, args);
+            this.busyError(response, request || args, false);
             return;
         }
         await this.memoryRequests.writeMemoryRequest(response, args);
@@ -820,6 +853,20 @@ export class GDBDebugSession extends SeqDebugSession {
                 };
                 this.liveWatchMonitor.registerClientRequest(rsp, args);
                 break;
+            }
+            case "unregisterClient": {
+                const rsp: UnregisterClientResponse = {
+                    ...response,
+                    body: {},
+                };
+                return await this.liveWatchMonitor.unregisterClientRequest(rsp, args);
+            }
+            case "liveWatchClientReady": {
+                const rsp: LiveWatchClientReadyResponse = {
+                    ...response,
+                    body: {},
+                };
+                return await this.liveWatchMonitor.liveWatchClientReadyRequest(rsp, args);
             }
             case "evaluateLive":
                 if (this.liveWatchMonitor.enabled()) {
@@ -940,6 +987,15 @@ export class GDBDebugSession extends SeqDebugSession {
                 this.sendResponse(response);
                 break;
             }
+            case "output-message": {
+                const msg = args?.message;
+                const type = args?.type || "console";
+                if (msg) {
+                    this.handleMsg(type, msg);
+                }
+                this.sendResponse(response);
+                break;
+            }
             default:
                 response.body = { error: "Invalid command." };
                 this.sendResponse(response);
@@ -977,7 +1033,7 @@ export class GDBDebugSession extends SeqDebugSession {
         if (RustDebugHelperEnabled) {
             return this.disassemblyAdapterNew.disassembleRequest(response, args);
         } else {
-            return this.disassemblyAdapter.disassembleRequest(response, args);
+            return this.disassemblyAdapter?.disassembleRequest(response, args);
         }
     }
     protected cancelRequest(response: DebugProtocol.CancelResponse, args: DebugProtocol.CancelArguments, request?: DebugProtocol.Request): void {
@@ -1099,13 +1155,16 @@ export class GDBDebugSession extends SeqDebugSession {
     }
 
     private getGdbPath(): string {
-        let gdbExePath = os.platform() !== "win32" ? `${this.args.toolchainPrefix}-gdb` : `${this.args.toolchainPrefix}-gdb.exe`;
+        const prefix = this.args.toolchainPrefix || "arm-none-eabi";
+        let gdbExePath = os.platform() !== "win32" ? `${prefix}-gdb` : `${prefix}-gdb.exe`;
         if (this.args.toolchainPath) {
+            // Everything was normalized be frontend to toolchainPath if provided. Join it with the gdb executable name.
             gdbExePath = path.normalize(path.join(this.args.toolchainPath, gdbExePath));
         }
-        const gdbMissingMsg = `GDB executable "${gdbExePath}" was not found.\n` + 'Please configure "mcu-debug.armToolchainPath" or "mcu-debug.gdbPath" correctly.';
+        const gdbMissingMsg = `GDB executable "${gdbExePath}" was not found.\n` + 'Please configure "mcu-debug.gdbPath" or "mcu-debug.armToolchainPath"  correctly.';
 
         if (this.args.gdbPath) {
+            // This trumps everything else and uses the explicitly provided gdbPath.
             gdbExePath = this.args.gdbPath;
         } else if (path.isAbsolute(gdbExePath)) {
             if (fs.existsSync(gdbExePath) === false) {
@@ -1137,6 +1196,12 @@ export class GDBDebugSession extends SeqDebugSession {
             `interpreter-exec console "source ${this.args.extensionPath}/support/gdb-swo.init"`,
             ...this.formatRadixGdbCommand(),
         ];
+    }
+
+    // Commands the second (live watch) GDB connection needs at startup: the same init commands as
+    // the main connection, plus whatever pre-connect commands were computed for this launch/attach.
+    public getLiveWatchStartCommands(): string[] {
+        return [...this.getGdbStartCommands(), ...this.gdbPreConnectInitCommands];
     }
 
     private normalizeArguments(args: ConfigurationArguments): ConfigurationArguments {
@@ -1202,12 +1267,66 @@ export class GDBDebugSession extends SeqDebugSession {
 
     private launchAttachInit(args: ConfigurationArguments) {
         this.args = this.normalizeArguments(args);
+        this.seedAvoidPorts();
         this.setupLogging();
         // We need go create the server session here now that args are normalized. In the ctor,
         // args are not available just had to keep the ts-compiler happy
         this.serverSession = new GDBServerSession(this);
         this.serverSession.serverController.on("event", this.serverControllerEvent.bind(this));
         this.rttTcpServer.on("event", this.serverControllerEvent.bind(this));
+    }
+
+    /**
+     * A port reservation is a live socket, so it cannot be held for the whole session -- the
+     * gdb-server has to bind it. The frontend closes that gap: it collects the ports of every
+     * live session (including the other cores of a multi-core group, whose ports the first core
+     * reserves up front) and hands them to us as `pvtAvoidPorts`. Those ports stay off-limits
+     * until the whole session group is gone.
+     *
+     * When debugging this extension we run in server mode, serving multiple debug sessions from
+     * one process, so clear whatever a previous session left behind and trust only the frontend.
+     */
+    private seedAvoidPorts() {
+        TcpPortScanner.AvoidPorts.clear();
+        for (const p of this.args.pvtAvoidPorts || []) {
+            TcpPortScanner.AvoidPorts.add(p);
+        }
+    }
+
+    private postInitComplete(): Promise<void> {
+        return new Promise(async (resolve) => {
+            const doBuiltinRtt = !!this.args.pvtRttConfig;
+            const doStart = this.args.liveWatch?.enabled || doBuiltinRtt;
+            if (doStart) {
+                this.liveWatchMonitor
+                    .requestLiveCapability()
+                    .then(async () => {
+                        if (doBuiltinRtt) {
+                            try {
+                                await this.rttManager.start(this.rttTcpServer);
+                            } catch (e) {
+                                this.handleMsg(Stderr, `ERROR: Failed to start built-in RTT support: ${formatThrown(e)}\n`);
+                            }
+                        }
+                    })
+                    .catch((e) => {
+                        this.handleMsg(Stderr, `ERROR: Live GDB connection failed to start: ${formatThrown(e)}\n`);
+                    });
+            }
+            // The disassmbly adapter relies on target info for various things like source mappings,
+            // so we need to wait for it to be initialized before we can use the disassembly adapter.
+            // It should have been started by the time we get here, but just in case, we wait for it
+            // to be initialized before initializing the disassembly adapter. Disassmbly is very low
+            // priority, so it doesn't matter if it is delayed a bit.
+            try {
+                await TargetInfo.Instance?.initialize();
+                this.disassemblyAdapter?.initialize();
+                this.disassemblyAdapterNew?.initialize();
+            } catch (e) {
+                this.handleMsg(Stderr, `ERROR: Failed to initialize target info and disassembly adapter: ${formatThrown(e)}\n`);
+            }
+            resolve();
+        });
     }
 
     private async launchAttachRequest(response: DebugProtocol.LaunchResponse, noDebug: boolean): Promise<void> {
@@ -1219,39 +1338,30 @@ export class GDBDebugSession extends SeqDebugSession {
             }
         };
         try {
-            this.on("configurationDone", async () => {
-                const doBuiltinRtt = !!this.args.pvtRttConfig;
-                const doStart = this.args.liveWatch?.enabled || doBuiltinRtt;
-                if (doStart) {
-                    this.liveWatchMonitor.start([...this.getGdbStartCommands(), ...this.gdbPreConnectInitCommands]);
-                    if (doBuiltinRtt) {
-                        try {
-                            await this.rttManager.start(this.rttTcpServer);
-                        } catch (e) {
-                            this.handleMsg(Stderr, `ERROR: Failed to start built-in RTT support: ${e instanceof Error ? e.message : String(e)}\n`);
-                        }
-                    }
-                }
-                this.disassemblyAdapter.initialize();
-                this.disassemblyAdapterNew.initialize();
-            });
-            this.handleMsg(Stdout, `MCU-Debug: Embedded MCU debug adapter version ${pkgJsonVersion} (${gitCommitHash}). ` + "Usage info: https://github.com/mcu-debug/mcu-debug#usage");
+            // this.on("configurationDone", async () => {
+            //     await this.postInitlizedEvent();
+            // });
+            this.handleMsg(Stdout, `MCU-Debug: Embedded MCU debug adapter version ${pkgJsonVersion} (${gitCommitHash}). ` + "Usage info: https://mcu-debug.github.io/mcu-debug/");
             if (this.args.debugFlags.anyFlags) {
-                this.handleMsg(Stderr, "Debug Flags Enabled. launch.json after processing by VSCode and MCU-Debug:\n");
+                this.handleMsg(Stdout, "Debug Flags Enabled. launch.json after processing by VSCode and MCU-Debug:\n");
                 const jsonStr = JSON.stringify(this.args, null, 2);
-                this.handleMsg(Stderr, jsonStr + "\n");
+                this.handleMsg(Stdout, jsonStr + "\n");
             }
 
             const showTimes = this.args.debugFlags.timestamps || this.args.debugFlags.gdbTraces;
             const reportTime = (stage: string) => {
                 if (showTimes) {
-                    this.handleMsg(Stderr, `Debug Time: ${stage} - ${Date.now() - this.timeStart} ms\n`);
+                    this.handleMsg(Stdout, `Debug Time: ${stage} - ${Date.now() - this.timeStart} ms\n`);
                 }
             };
             this.getSymbolAndLoadCommands();
             // Go ahead and start loading symbols in parallel to gdb and gdb server startup
             const loadSymbolsPromise = this.loadSymbols();
             const startServerPromise = this.startServer();
+            // startServerPromise may reject while we're still awaiting startGdb() below (e.g. gdb-server exits
+            // quickly). Attach a no-op handler immediately so Node.js doesn't fire unhandledRejection during that
+            // window. The actual error is still caught by the try/catch around `await startServerPromise` below.
+            void startServerPromise.catch(() => { });
 
             // Question? Should we supress all running/stopped events until we are fully started? VSCode can
             // easily get confused if we send stopped/running events too early
@@ -1260,15 +1370,15 @@ export class GDBDebugSession extends SeqDebugSession {
                 await this.startGdb();
             } catch (e) {
                 const msg = "\nMake sure that the GDB executable is installed correctly and can be run from command line.\n";
-                return finishWithError(`Failed to start GDB: ${e instanceof Error ? e.message : String(e)}${msg}`);
+                return finishWithError(`Failed to start GDB: ${formatThrown(e)}${msg}`);
             }
             reportTime("GDB Ready");
             const gdbPreConnectPromise = this.sendCommandsWithWait(this.gdbPreConnectInitCommands);
             try {
                 await startServerPromise;
             } catch (e) {
-                const msg = "\nMake sure that the GDB server is configured correctly. See TERMINAL->gdb-server tab for details.\n";
-                return finishWithError(`Failed to start debug server: ${e instanceof Error ? e.message : String(e)}${msg}`);
+                const msg = "\nMake sure that the GDB server is configured correctly. See 'MCU Debug -> gdb-server' tab for details.\n";
+                return finishWithError(`Failed to start debug server: ${formatThrown(e)}${msg}`);
             }
             reportTime("GDB Server Ready");
             await gdbPreConnectPromise;
@@ -1280,12 +1390,18 @@ export class GDBDebugSession extends SeqDebugSession {
             this.sendEvent(new GenericCustomEvent("post-start-server", this.args)); // if SWO launch was requested by the server controller, we wait for it to connect before starting actual debug
 
             // Let gdb connect to the server
-            await this.sendCommandsWithWait(this.getConnectCommands()); // Can throw
+            await this.sendCommandsWithWait(this.getConnectCommandsPre()); // Can throw
+            // Once connected, we can initialize arch details, this is as early as possible to ensure that any architecture-specific settings are correctly applied
+            const tInfo = new TargetInfo(this.gdbInstance, this);
+            await tInfo.initialize();
+            // Get the disassembly adapter initialized, wait for it to finish asynchronously
+            await this.sendCommandsWithWait(this.getConnectCommandsPost()); // Can throw
+
+            const postInitPromise = this.postInitComplete();
+
             this.serverSession.serverController.debuggerLaunchStarted(this);
 
             // Post connect, target info should be available
-            const tInfo = new TargetInfo(this.gdbInstance, this);
-            const tInfoPromise = tInfo.initialize();
 
             reportTime("GDB Init Commands Sent");
             // Let client know we are done with the launch/attach request and ready.
@@ -1305,6 +1421,9 @@ export class GDBDebugSession extends SeqDebugSession {
             // happen, it will finally send a configDone request and now everything should be stable
             this.sendEvent(new GenericCustomEvent("post-start-gdb", this.args));
 
+            // Serial ports are not opened from here any more. Clients open them before they launch the
+            // adapter, so the ports attach before the target runs and no output is lost.
+
             // This part of the process happens after we have sent the initialized event
             // and responded to the launch/attach request. Or else, configrationDoneRequest
             // will never happen
@@ -1312,19 +1431,19 @@ export class GDBDebugSession extends SeqDebugSession {
 
             // Following can be deferred to configurationDone
             await loadSymbolsPromise;
-            await tInfoPromise;
             if (this.debugHelperPromise) {
                 try {
                     await this.debugHelperPromise;
-                    this.handleMsg(Stderr, "Debug helper initialized successfully.\n");
                 } catch (e) {
                     this.handleMsg(Stderr, `WARNING: Debug helper initialization failed. Please report this issue. Debugging may still work ${e}\n`);
                 }
             }
             this.gdbInstance.currentCommandTimeout = GdbInstance.DefaultCommandTimeout;
             reportTime("Ready for full debugging");
+            await postInitPromise;
+            this.sendEvent(new PostInitializedEvent(this.args));
         } catch (e) {
-            return finishWithError(`Launch/Attach request failed: ${e instanceof Error ? e.message : String(e)}`);
+            return finishWithError(`Launch/Attach request failed: ${formatThrown(e)}`);
         }
     }
 
@@ -1342,7 +1461,6 @@ export class GDBDebugSession extends SeqDebugSession {
             if (rttConfig?.enabled) {
                 const symName = this.symbolTable.rttSymbolName;
                 if (!rttConfig.address) {
-                    this.handleMsg(Stderr, 'INFO: "rttConfig.address" not specified. Defaulting to "auto"\n');
                     rttConfig.address = "auto";
                 }
                 if (rttConfig.address === "auto") {
@@ -1383,7 +1501,7 @@ export class GDBDebugSession extends SeqDebugSession {
         const gdbPath = this.getGdbPath();
         const gdbArgs = ["-q", "--interpreter=mi3", ...(this.args.debuggerArgs || [])];
         this.gdbInstance.debugFlags = this.args.debugFlags ?? this.gdbInstance.debugFlags ?? {};
-        this.handleMsg(GdbEventNames.Console, `mcu-debug: Starting GDB: ${gdbPath} ${gdbArgs.join(" ")}\n`);
+        this.handleMsg(GdbEventNames.Stdout, `mcu-debug: Starting GDB: ${gdbPath} ${gdbArgs.join(" ")}\n`);
         this.subscribeToGdbEvents();
         await this.gdbInstance.start(gdbPath, gdbArgs, this.args.cwd, this.getGdbStartCommands());
     }
@@ -1391,12 +1509,12 @@ export class GDBDebugSession extends SeqDebugSession {
     private async startServer(): Promise<void> {
         try {
             const mode = this.args.pvtSessionMode;
-            await this.serverSession.startServer(); // Can throw
             this.serverSession.on("server-exited", (code, signal) => {
                 const msg = `GDB Server exited unexpectedly with code ${code} signal ${signal}`;
                 this.handleMsg(Stderr, msg + "\n");
                 this.sendEvent(new TerminatedEvent());
             });
+            await this.serverSession.startServer(); // Can throw
         } catch (e) {
             throw e;
         }
@@ -1421,8 +1539,8 @@ export class GDBDebugSession extends SeqDebugSession {
             // If you just used 'add-symbol-file' debugging works but RTOS detection fails
             // for most debuggers.
             for (const symF of this.args.symbolFiles) {
-                const offset = symF.offset !== undefined ? `-o ${formatAddress(parseAddrVal(symF.offset))}` : "";
-                let otherArgs = symF.textaddress !== undefined ? ` ${formatAddress(parseAddrVal(symF.textaddress))}` : "";
+                const offset = symF.offset !== undefined ? `-o ${formatAddress(parseAddrVal(symF.offset))}"` : "";
+                let otherArgs = symF.textaddress !== undefined ? ` ${formatAddress(parseAddrVal(symF.textaddress))}"` : "";
                 for (const section of symF.sections) {
                     otherArgs += ` -s ${section.name} ${formatAddress(parseAddrVal(section.address))}`;
                 }
@@ -1454,7 +1572,7 @@ export class GDBDebugSession extends SeqDebugSession {
         ];
         return cmds;
     }
-    protected getConnectCommands(): string[] {
+    protected getConnectCommandsPre(): string[] {
         const commands: string[] = [];
         if (this.args.pvtSessionMode === SessionMode.Attach) {
             commands.push(...(this.args.preAttachCommands?.map(COMMAND_MAP) ?? []));
@@ -1463,7 +1581,11 @@ export class GDBDebugSession extends SeqDebugSession {
         }
 
         commands.push(...this.getServerConnectCommands());
+        return commands;
+    }
 
+    protected getConnectCommandsPost(): string[] {
+        const commands: string[] = [];
         if (this.args.pvtSessionMode === SessionMode.Attach) {
             const attachCommands = this.args.overrideAttachCommands != null ? this.args.overrideAttachCommands.map(COMMAND_MAP) : this.serverSession.serverController.attachCommands();
             commands.push(...attachCommands);
@@ -1483,7 +1605,7 @@ export class GDBDebugSession extends SeqDebugSession {
                     this.continuing = true;
                     await this.gdbMiCommands.sendContinue(undefined);
                 } catch (e) {
-                    this.handleMsg(Stderr, `mcu-debug: Failed to send continue command: ${e instanceof Error ? e.message : String(e)}\n`);
+                    this.handleMsg(Stderr, `mcu-debug: Failed to send continue command: ${formatThrown(e)}\n`);
                 }
             };
             if (this.configurationDone === false) {
@@ -1514,7 +1636,7 @@ export class GDBDebugSession extends SeqDebugSession {
             await this.sendCommandsWithWait(swoRttCommands);
             this.serverSession.serverController.debuggerLaunchCompleted();
         } catch (e) {
-            const msg = `SWO/RTT Initialization failed: ${e}`;
+            const msg = `SWO/RTT Initialization failed: ${formatThrown(e)}`;
             this.handleMsg(Stderr, msg);
             this.sendEvent(new GenericCustomEvent("popup", { type: "error", message: msg }));
         }
@@ -1524,10 +1646,14 @@ export class GDBDebugSession extends SeqDebugSession {
             if (this.args.noDebug) {
                 // No Debug -> Always Continue
                 needsContinue = true;
-            } else if (!this.args.breakAfterReset && this.args.runToEntryPoint) {
-                // Run to Entry Point -> Set Breakpoint, Run. Only if breakAfterReset is false
+            } else if (this.args.runToEntryPoint) {
+                // Run to Entry Point -> Set Breakpoint. breakAfterReset is ignored in this case, we always want to run to
+                // the entry point and stop there, even if breakAfterReset is false. This mimics cortex-debug's behavior
                 commands = [`-break-insert -t ${this.args.runToEntryPoint}`];
+                const cmds = isReset ? (this.args.postResetSessionCommands?.map(COMMAND_MAP) ?? []) : (this.args.postStartSessionCommands?.map(COMMAND_MAP) ?? []);
+                commands.push(...cmds);
                 needsContinue = true;
+                needsDelay = cmds.length > 0;
             } else {
                 // Standard Debug
                 // If breakAfterReset is true -> Stay Stopped (needsContinue = false)
@@ -1552,23 +1678,23 @@ export class GDBDebugSession extends SeqDebugSession {
         try {
             await this.sendCommandsWithWait(commands);
         } catch (e) {
-            this.handleMsg(Stderr, `mcu-debug: Warning: Failed to run post start session commands (e.g. runToEntryPoint): ${e instanceof Error ? e.message : String(e)}\n`);
+            this.handleMsg(Stderr, `mcu-debug: Warning: Failed to run post start session commands (e.g. runToEntryPoint): ${formatThrown(e)}\n`);
         }
         this.suppressStoppedEvents = false;
 
         if (needsDelay) {
-            await new Promise((resolve) => setTimeout(resolve, 100)); // Allow GDB to finish processing custom commands.
+            await new Promise((resolve) => setTimeout(resolve, 100)); // Small delay to allow GDB to process commands
         }
         if (needsContinue) {
             this.sendContinueWhenPossible().catch((e) => {
-                this.handleMsg(Stderr, `mcu-debug: Failed to continue after session mode commands: ${e instanceof Error ? e.message : String(e)}\n`);
+                this.handleMsg(Stderr, `mcu-debug: Failed to continue after session mode commands: ${formatThrown(e)}\n`);
             });
             return;
         }
         try {
             await this.gdbMiCommands.sendFlushRegs();
         } catch (e) {
-            this.handleMsg(Stderr, `mcu-debug: Warning: Failed to flush registers before sending stopped event: ${e instanceof Error ? e.message : String(e)}\n`);
+            this.handleMsg(Stderr, `mcu-debug: Warning: Failed to flush registers before sending stopped event: ${formatThrown(e)}\n`);
         }
         if (!this.isRunning()) {
             // VSCode still thinks we are running although, we should be stopped at entry point
@@ -1589,7 +1715,7 @@ export class GDBDebugSession extends SeqDebugSession {
                 try {
                     await this.gdbInstance!.sendCommand(cmd);
                 } catch (e) {
-                    reject(new Error(`Failed to send start command to GDB: ${cmd}\nError: ${e instanceof Error ? e.message : String(e)}`));
+                    reject(new Error(`Failed to send start command to GDB: ${cmd}\nError: ${formatThrown(e)}`));
                     return;
                 }
             }
@@ -1619,7 +1745,9 @@ export class GDBDebugSession extends SeqDebugSession {
     }
 
     quitEvent() {
-        this.sendEvent(new TerminatedEvent());
+        if (!this.restarting) {
+            this.sendEvent(new TerminatedEvent());
+        }
     }
 
     // Unlike in cortex-debug, we get the thread info here before sending the stop event

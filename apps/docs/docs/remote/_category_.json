@@ -1,0 +1,8 @@
+{
+  "label": "Remote Debugging",
+  "position": 7,
+  "link": {
+    "type": "doc",
+    "id": "remote/index"
+  }
+}

@@ -57,36 +57,42 @@ function generateConfiguration() {
         ...createPlatformProps("PEGDBServerPath", "Path to the PE Micro GDB Server. If not set, the extension will look in the system path."),
     };
 
-    // Group 4: MCP AI Integration (Using mcu-ai-debug prefix)
+    // Group 4: Legacy MCP bridge (opt-in; CLI is the supported AI interface).
     const mcpProperties = {
+        "mcu-ai-debug.enableMcp": {
+            type: "boolean",
+            default: false,
+            description: "(Deprecated) Enable the legacy Live Watch MCP server and workspace port file. Disabled by default; use the mcu-debug CLI for AI-assisted debugging.",
+            deprecationMessage: "Deprecated: use the mcu-debug CLI for AI-assisted debugging. This setting remains available for legacy MCP clients.",
+        },
         "mcu-ai-debug.mcpRequireManualRecording": {
             type: "boolean",
             default: false,
-            description: "If enabled, AI Agent recording requests require manual user confirmation (Start/Stop) instead of running for a fixed duration. Useful for synchronizing data capture with physical hardware operations.",
+            description: "(Deprecated) Require manual Start/Stop for legacy MCP recording requests.",
         },
         "mcu-ai-debug.mcpRecordingMaxDuration": {
             type: "number",
             default: 30,
-            description: "Maximum allowed recording duration (in seconds) for AI agents in automatic mode.",
+            description: "(Deprecated) Maximum automatic legacy MCP recording duration in seconds.",
         },
         "mcu-ai-debug.mcpManualRecordingMaxDuration": {
             type: "number",
             default: 60,
-            description: "Maximum allowed recording duration (in seconds) for AI agents in manual mode. Should be >= mcpRecordingMaxDuration to account for human reaction time.",
+            description: "(Deprecated) Maximum manual legacy MCP recording duration in seconds.",
         },
         "mcu-ai-debug.mcpPreferredPort": {
             type: "number",
             default: 51234,
             minimum: 1,
             maximum: 65535,
-            description: "Preferred localhost port for the MCU-Debug MCP server. If unavailable, the extension searches the following port range.",
+            description: "(Deprecated) Preferred localhost port for the legacy MCP server.",
         },
         "mcu-ai-debug.mcpPortSearchRange": {
             type: "number",
             default: 100,
             minimum: 1,
             maximum: 1000,
-            description: "Number of consecutive ports to try for the MCU-Debug MCP server, starting at mcpPreferredPort.",
+            description: "(Deprecated) Number of ports to try for the legacy MCP server.",
         },
     };
 
@@ -104,7 +110,7 @@ function generateConfiguration() {
             properties: serverProperties,
         },
         {
-            title: "MCU Debug: MCP AI Integration",
+            title: "MCU Debug: MCP AI Integration (Deprecated)",
             properties: mcpProperties,
         },
     ];
@@ -267,6 +273,193 @@ function updatePackageJson() {
 
     fs.writeFileSync(PACKAGE_JSON_PATH, JSON.stringify(pkg, null, 2) + "\n");
     console.log("Updated package.json");
+
+    generateMarkdownReference();
+}
+
+function generateMarkdownReference() {
+    const MARKDOWN_PATH = path.join(__dirname, "../../../apps/docs/docs/reference/launch-properties.md");
+
+    const leaves = [];
+
+    function isLeaf(node) {
+        if (!node || typeof node !== "object") return false;
+        if (node.properties && typeof node.properties === "object") return false;
+        if (node.type && node.type !== "object") return true;
+
+        const hasNestedKeys = Object.keys(node).some(key => {
+            if (["type", "description", "default", "enum", "properties", "items", "required", "anyOf", "oneOf", "deprecationMessage", "minimum", "maximum", "multipleOf", "pattern", "additionalProperties"].includes(key)) {
+                return false;
+            }
+            const val = node[key];
+            return val && typeof val === "object";
+        });
+        if (!hasNestedKeys && node.description) {
+            return true;
+        }
+        return false;
+    }
+
+    function recurse(node, pathStr) {
+        if (!node || typeof node !== "object") return;
+
+        const hasNestedItems = node.type === "array" && node.items && typeof node.items === "object" &&
+            (node.items.properties || Object.keys(node.items).some(k => {
+                if (["type", "description", "default", "enum", "properties", "items", "required", "anyOf", "oneOf", "deprecationMessage", "minimum", "maximum", "multipleOf", "pattern", "additionalProperties"].includes(k)) {
+                    return false;
+                }
+                return node.items[k] && typeof node.items[k] === "object";
+            }));
+
+        if (hasNestedItems) {
+            if (node.description) {
+                leaves.push({
+                    name: pathStr,
+                    type: "array",
+                    description: node.description,
+                    default: node.default,
+                    raw: node
+                });
+            }
+            recurse(node.items, `${pathStr}[]`);
+            return;
+        }
+
+        if (isLeaf(node)) {
+            leaves.push({
+                name: pathStr,
+                type: Array.isArray(node.type) ? node.type.join(" | ") : (node.type || "any"),
+                description: node.description || "",
+                default: node.default,
+                raw: node
+            });
+            return;
+        }
+
+        if (node.properties && typeof node.properties === "object") {
+            if (Array.isArray(node.type) && node.description) {
+                leaves.push({
+                    name: pathStr,
+                    type: node.type.join(" | "),
+                    description: node.description,
+                    default: node.default,
+                    raw: node
+                });
+            }
+            for (const [key, val] of Object.entries(node.properties)) {
+                recurse(val, pathStr ? `${pathStr}.${key}` : key);
+            }
+            return;
+        }
+
+        const entries = Object.entries(node).filter(([key, val]) => {
+            if (["type", "description", "default", "enum", "properties", "items", "required", "anyOf", "oneOf", "deprecationMessage", "minimum", "maximum", "multipleOf", "pattern", "additionalProperties"].includes(key)) {
+                return false;
+            }
+            return val && typeof val === "object";
+        });
+
+        if (entries.length > 0) {
+            for (const [key, val] of entries) {
+                recurse(val, pathStr ? `${pathStr}.${key}` : key);
+            }
+        }
+    }
+
+    for (const [key, val] of Object.entries(definitions)) {
+        recurse(val, key);
+    }
+
+    function getLaunchAttachBoth(name, prop) {
+        const desc = (prop.description || "").toLowerCase();
+        const nameLower = name.toLowerCase();
+
+        if (nameLower.includes("launch") && !nameLower.includes("attach")) {
+            return "launch";
+        }
+        if (nameLower.includes("attach") && !nameLower.includes("launch")) {
+            return "attach";
+        }
+        if (desc.includes("ignored for attach") || desc.includes("applies to launch") || desc.includes("launch only")) {
+            return "launch";
+        }
+        if (desc.includes("ignored for launch") || desc.includes("applies to attach") || desc.includes("attach only")) {
+            return "attach";
+        }
+        return "both";
+    }
+
+    leaves.sort((a, b) => a.name.localeCompare(b.name));
+
+    let mdContent = `---
+sidebar_position: 100
+title: launch.json Properties Reference
+---
+
+# launch.json Properties Reference
+
+This document provides a complete, flattened list of all properties supported in your \`.vscode/launch.json\` configuration for the **MCU-Debug** debug adapter.
+
+### Understanding the Table
+
+- **Property Name / Path:** The JSON key path of the configuration property. For nested structures (such as \`hostConfig\` or \`rttConfig\`), properties are flattened (e.g. \`hostConfig.enabled\`).
+- **Type:** The expected data type(s) (e.g., \`string\`, \`boolean\`, \`number\`, \`array\`, or union types).
+- **Request Mode:** Indicates whether the property applies to a \`"launch"\` request, an \`"attach"\` request, or \`"both"\`.
+- **Default & Description:** The default value (if any) and a description of the property.
+
+| Property Name / Path | Type | Request Mode | Default & Description |
+| :--- | :--- | :--- | :--- |
+`;
+
+    function isEmptyDefault(value) {
+        if (value === undefined || value === null) return true;
+        if (value === "") return true;
+        if (Array.isArray(value) && value.length === 0) return true;
+        if (typeof value === "object" && Object.keys(value).length === 0) return true;
+        return false;
+    }
+
+    function formatPath(pathStr) {
+        const parts = pathStr.split(".");
+        const formattedParts = parts.map((part, index) => {
+            const indent = "&nbsp;".repeat(index * 2);
+            return `${indent}${part}`;
+        });
+        return `<code>${formattedParts.join("<br/>")}</code>`;
+    }
+
+    for (const leaf of leaves) {
+        const nameCol = formatPath(leaf.name);
+        const typeCol = `\`${leaf.type}\``;
+        const modeCol = getLaunchAttachBoth(leaf.name, leaf.raw);
+
+        let descParts = [];
+        if (!isEmptyDefault(leaf.default)) {
+            const defaultStr = typeof leaf.default === "object" ? JSON.stringify(leaf.default) : String(leaf.default);
+            const escapedDefaultStr = defaultStr
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/\{/g, "\\{")
+                .replace(/\}/g, "\\}");
+            descParts.push(`**Default:** \`${escapedDefaultStr}\``);
+        }
+        if (leaf.description) {
+            const escapedDesc = leaf.description.trim()
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/\{/g, "\\{")
+                .replace(/\}/g, "\\}");
+            descParts.push(escapedDesc);
+        }
+        const descCol = descParts.join("<br/>")
+            .replace(/\|/g, "\\|")
+            .replace(/\n/g, " ");
+
+        mdContent += `| ${nameCol} | ${typeCol} | ${modeCol} | ${descCol} |\n`;
+    }
+
+    fs.writeFileSync(MARKDOWN_PATH, mdContent);
+    console.log(`Generated launch.json properties reference at: ${MARKDOWN_PATH}`);
 }
 
 updatePackageJson();

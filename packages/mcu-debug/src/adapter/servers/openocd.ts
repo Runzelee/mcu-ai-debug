@@ -82,7 +82,7 @@ export class OpenOCDServerController extends EventEmitter implements GDBServerCo
     public connectCommands(): string[] {
         const gdbport = this.ports[createPortName(this.args.targetProcessor)].localPort;
 
-        return [`target-select extended-remote localhost:${gdbport}`];
+        return [`target-select extended-remote 127.0.0.1:${gdbport}`];
     }
 
     public liveGdbInitCommands(): string[] {
@@ -204,8 +204,8 @@ export class OpenOCDServerController extends EventEmitter implements GDBServerCo
     public serverArguments(): string[] {
         let serverargs: string[] = [];
         let helpers = `${this.args.extensionPath}/support/openocd-helpers.tcl`;
-        if (this.args.hostConfig?.enabled) {
-            const remoteHelpers = "./mcu-debug-helper/support/openocd-helpers.tcl";
+        if (typeof this.args.hostConfig === "object" && this.args.hostConfig?.enabled) {
+            const remoteHelpers = "./mcu-debug/support/openocd-helpers.tcl";
             this.args.hostConfig.syncFiles = this.args.hostConfig.syncFiles || [];
             this.args.hostConfig.syncFiles.push({ local: helpers, remote: remoteHelpers });
             helpers = remoteHelpers;
@@ -266,9 +266,10 @@ export class OpenOCDServerController extends EventEmitter implements GDBServerCo
             serverargs.push("-c", cmd);
         }
 
-        if (this.args.liveWatch?.enabled) {
-            serverargs.push("-c", "CDLiveWatchSetup");
-        }
+        // Always set this up: a client (Live Watch, or any other extension) can request live probing
+        // lazily at any point during the session, regardless of whether liveWatch/RTT were enabled
+        // in launch.json. Costs nothing if never used.
+        serverargs.push("-c", "CDLiveWatchSetup");
 
         OpenOCDLog("Launching: " + serverargs.join(" "));
         return serverargs;
@@ -278,7 +279,7 @@ export class OpenOCDServerController extends EventEmitter implements GDBServerCo
         return /Listening on port \d+ for gdb connections?/i;
     }
 
-    public serverLaunchStarted(): void {}
+    public serverLaunchStarted(): void { }
 
     public serverLaunchCompleted(): void {
         if (this.args.swoConfig.enabled) {

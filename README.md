@@ -1,161 +1,41 @@
-# MCU-AI-Debug: An Advanced UI and AI Integration Fork of MCU-Debug
+# MCU-AI-Debug
 
-This readme covers the major capabilities added to the `mcu-debug` VS Code extension, including editor integration for quick Live Watch additions, local recording to common file formats, a high-performance real-time graphing engine, and a Model Context Protocol (MCP) bridge for AI agent interoperability.
+MCU-AI-Debug is an unofficial fork of [mcu-debug](https://github.com/mcu-debug/mcu-debug). It carries the upstream command-line debugger and AI Cockpit, plus this fork's Live Watch batch editing, snapshots, CSV/JSONL recording, and real-time graphs. The earlier Live Watch MCP bridge remains available as a **deprecated, opt-in** compatibility feature.
 
----
+## Debug from the CLI
 
-## 1. Model Context Protocol (MCP) Server
+The upstream `mcu-debug` CLI uses your `mcu-debug` launch configuration to start the GDB server and debug adapter. It combines GDB, RTT, and UART output in one session. Ordinary GDB commands such as `break main`, `continue`, and `print counter` work in the CLI; session commands such as `status`, `!!SIGINT`, `!!NOTE`, and `!!send [RTT#0] text` are provided by mcu-debug. Another terminal or AI agent can join a running session with `mcu-debug attach`.
 
-The extension hosts an embedded MCP server that exposes debugger state to external AI agents (Copilot, Antigravity, Cursor, Claude Desktop, etc.) without requiring Python environments, GDB scripting, or memory dump parsing.
+```sh
+mcu-debug debug -c "Your launch configuration"
+mcu-debug attach
+```
 
-### Quick Start
+For a plain stream suitable for an AI subprocess or a log, use `mcu-debug debug -c "Your launch configuration" --no-tui`. The VS Code AI Cockpit displays the shared session in a VS Code panel. See the [upstream CLI guide](https://mcu-debug.github.io/mcu-debug/docs/cli/) and the bundled [AI skill](./packages/mcu-debug/support/skills/mcu-debug-fw/SKILL.md) for commands and setup. The CLI requires Node.js 22 or newer and the bundled `mdbg` helper.
 
-1. Open the Command Palette (Ctrl+Shift+P) and run `MCU-Debug: Generate MCP Configuration for AI Agents`.
-2. Choose a configuration format:
-	- `VS Code Native MCP` — writes `.vscode/mcp.json` (VS Code-native MCP clients can auto-discover it) and `mcu-debug-mcp.md`.
-	- `Generic MCP` — writes `.vscode/mcu-debug-mcp.json` and `mcu-debug-mcp.md`; copy the JSON into external AI agents' MCP settings (Antigravity, Cursor, Claude Desktop, etc.).
-3. Start a new conversation or dialog and send `.vscode/mcu-debug-mcp.md` to agent to ensure it uses the built-in MCP tools.
+RTT data is emitted by firmware through its RTT buffers; the CLI labels its channels and can send text back with `!!send`. CLI mode does **not** currently expose Live Watch variable subscriptions. Use the VS Code Live Watch view for uninterrupted variable sampling and the local recording/graphing features below.
 
-![mcp](./packages/mcu-debug/images/mcp.png)
+## Live Watch additions in this fork
 
-### Architecture
+- Select an expression in the editor and choose **Add to Live Watch**. The checklist button on the Live Watch view enables multiline batch addition and checked bulk removal.
+- **Save Snapshot** selects leaf variables and exports their current values as JSON. Expanded struct members can be selected for capture.
+- **Start Recording** selects variables and writes a timestamped CSV or JSONL file until **Stop Recording** is used.
+- **Open Live Graph** plots watched numeric values in split or overlay mode, with time/Y zoom and historical panning.
 
-- A TCP server listens on `127.0.0.1`, preferring port `51234` and automatically moving to the next available port if another VS Code window already owns it.
-- A bridge script (`support/mcp-bridge.js`) connects external MCP clients to this TCP server. Generated MCP configs read `.vscode/mcu-debug-mcp-port.json`, so multiple VS Code workspaces can each use their own MCP port.
-- The `mcu-debug: Generate MCP Configuration` command auto-generates ready-to-use JSON configs and a comprehensive API reference document (`mcu-debug-mcp.md`).
+![Live Watch graph](./packages/mcu-debug/images/live-watch-graph.png)
 
-### MCP Tools
+These view features are independent of the CLI's RTT stream. They still require a supported live debugging session and hardware that permits running-target reads.
 
-| Tool | Input | Description |
-|---|---|---|
-| `get_livewatch_variables` | None | Returns a JSON snapshot of all watched variables and their current values. Unexpanded structs are flagged with `<STRUCT_OR_ARRAY_UNEXPANDED>`. |
-| `add_livewatch_variable` | `{ "expr": "..." }` | Adds a C/C++ expression to the Live Watch panel. |
-| `expand_livewatch_struct` | `{ "expr": "..." }` | Expands an unexpanded struct/array to reveal its children. |
-| `record_livewatch_variables` | `{ "duration_ms": N }` | Automatically records all leaf variables for a fixed duration and returns timeseries data. |
-| `record_livewatch_variables_manual` | None | Records with user-controlled Start/Stop buttons in VS Code. Designed for hardware-synchronized data capture. |
+## Legacy MCP bridge (deprecated)
 
-### Struct Expansion Safety
+The old MCP server is **off by default**. It does not listen on a port or write a workspace MCP port file unless `mcu-ai-debug.enableMcp` is enabled in VS Code Settings. This setting is marked **Deprecated**. For existing MCP clients, enable it and then run **MCU-AI-Debug: Generate MCP Configuration for AI Agents**. Only that explicit command writes `.vscode/mcp.json` or `.vscode/mcu-debug-mcp.json` and `.vscode/mcu-debug-mcp.md`. No MCP instruction Markdown is generated during normal startup.
 
-When `get_livewatch_variables` encounters an unexpanded struct or array, it returns the sentinel value `<STRUCT_OR_ARRAY_UNEXPANDED>` instead of attempting a potentially dangerous bulk memory read. The AI agent must explicitly call `expand_livewatch_struct` to reveal the struct's children, then re-query `get_livewatch_variables` to read the expanded members.
+The legacy tools cover Live Watch snapshots, expression addition, struct expansion, and timed or manual recording. See the [legacy MCP reference](./docs/mcu-debug-mcp.md) if you still use them. Existing workspace MCP configuration files from older versions are not removed automatically; remove them yourself when switching clients to the CLI.
 
-### Recording Modes
+## Build and validation
 
-**Automatic Mode** (default): The agent specifies `duration_ms` and a progress notification with a cancel button appears in VS Code. Duration is capped by `mcu-ai-debug.mcpRecordingMaxDuration` (default: 30s).
+Use Node.js 22 or newer. Run `npm install`, then `npm run compile`. Rust builds require the toolchains described in [mdbg build instructions](./packages/mdbg/BUILD.md). A device-level debug/RTT check is still needed before relying on a new build with real hardware.
 
-**Manual Mode** (opt-in via settings): When `mcu-ai-debug.mcpRequireManualRecording` is enabled, calling `record_livewatch_variables` returns a `MANUAL_MODE_REQUIRED` status, directing the agent to use `record_livewatch_variables_manual` instead. This tool presents two sequential VS Code prompts:
-1. "Start Recording" / "Cancel" -- the user clicks Start when they are physically ready.
-2. "Stop Recording" -- the user clicks Stop after completing their hardware operation.
+## Relationship and licenses
 
-This two-phase workflow allows engineers to precisely synchronize AI data capture with physical hardware operations (e.g., rotating a potentiometer, pressing a button, actuating a motor). Maximum wall-clock time is capped by `mcu-ai-debug.mcpManualRecordingMaxDuration` (default: 60s).
-
-### Generated Documentation
-
-The `MCU-AI-Debug: Generate MCP Configuration for AI Agents` command produces a [mcu-debug-mcp.md](./docs/mcu-debug-mcp.md) file that serves as both a human setup guide and an AI system prompt. It contains:
-
-- Exhaustive per-tool API reference with all possible `status` codes in table format.
-- Behavioral rules that prevent agents from writing custom scrapers or parsing GDB output.
-- Cross-referencing logic between automatic and manual recording tools.
-- VS Code settings reference table.
-
----
-
-## 2. Editor integration, Snapshots & Local Recording
-
-Make debugging workflows faster by adding expressions directly from the editor, saving one-shot JSON snapshots, and recording Live Watch data to local files.
-
-### Quick Add from Editor
-
-- While debugging with MCU-Debug, select a C/C++ expression in the editor, right-click and choose "Add to Live Watch" to push the expression into the Live Watch panel instantly. The same action is available from the Command Palette via the `Add to Live Watch` command (command id: `mcu-ai-debug.liveWatch.addSelectionToLiveWatch`).
-- Use the checklist action in the Live Watch title bar to enter batch-edit mode. Paste one expression per line, tick the expressions to add, or tick existing top-level watches and remove them together.
-
-![right_click](./packages/mcu-debug/images/right-click.png)
-
-### Live Watch Snapshot (JSON)
-
-- The Live Watch view now includes a `Save Snapshot` action that first shows the same leaf-variable picker used by recording, then exports the selected values to a `.json` file.
-- Snapshots include `timestamp`, `isoTime`, `variable_count`, and a `variables` object keyed by expression.
-- Only selected leaf variables are exported, so structs/arrays must be expanded first just like recording.
-
-### Local Recording (CSV / JSONL)
-
-- The Live Watch supports recording selected leaf variables to a local file. Click the `Start Recording` / `Stop Recording` icon from the Live Watch view or run form the Command Palette — a Save dialog lets you choose `.csv` or `.jsonl` (newline-delimited JSON).
-- CSV files include a header row `Timestamp` plus quoted variable names; JSONL produces one JSON object per line with a `timestamp` field and the variables as keys. The recorder sanitizes common GDB value formats (char literals, enum assignments) to numeric/string values and caches last-known values so each recorded row contains a value for every selected column.
-
-### Quick usage
-
-- Add expressions from the editor (right-click → "Add to Live Watch").
-- Run `Save Snapshot` from the Live Watch view, select the leaf variables you want, then export them to JSON.
-- Run `Start Recording` from the Live Watch view; select variables and a file path when prompted.
-- Stop recording with `Stop Recording` (command or UI). The file will contain a timestamped timeseries in your chosen format.
-
----
-
-## 3. High-Performance Canvas 2D Live Grapher
-
-The Live Watch system includes a hardware-accelerated HTML5 Canvas rendering engine for real-time variable visualization.
-
-### Features
-
-- **Dual Display Modes**: Switch between "Split Mode" (one graph per variable with independent Y-axes) and "Overlay Mode" (all variables on a shared Y-axis).
-- **Oscilloscope Auto-scroll**: By default, the graph behaves like a real-time oscilloscope, automatically scrolling to show the latest data. Users can break into manual "PAN MODE" for free-form navigation of historical data.
-- **T and Y Sliders**: Dedicated slider controls on the right and bottom edges allow precise zooming of the Time and Y axes. Mouse wheel zooming is also supported and synchronized with the sliders.
-- **Robust Rendering**: Strict Canvas `ctx.clip()` clipping prevents all label bleeding and border artifacts in both Split and Overlay modes.
-
-![live_watch_graph](./packages/mcu-debug/images/live-watch-graph.png)
-
----
-
-## 4. VS Code Settings
-
-| Setting | Type | Default | Description |
-|---|---|---|---|
-| `mcu-ai-debug.mcpRequireManualRecording` | boolean | `false` | When enabled, automatic recording returns `MANUAL_MODE_REQUIRED` and agents must use the manual recording tool. |
-| `mcu-ai-debug.mcpRecordingMaxDuration` | number | `30` | Maximum recording duration in seconds for automatic mode. |
-| `mcu-ai-debug.mcpManualRecordingMaxDuration` | number | `60` | Maximum recording duration in seconds for manual mode. |
-| `mcu-ai-debug.mcpPreferredPort` | number | `51234` | Preferred localhost port for the MCP server. |
-| `mcu-ai-debug.mcpPortSearchRange` | number | `100` | Number of consecutive ports to try when the preferred MCP port is busy. |
-
----
-
-## 5. Key Files
-
-| File | Purpose |
-|---|---|
-| `src/frontend/mcp-server.ts` | MCP tool definitions and request handlers |
-| `src/frontend/extension.ts` | MCP config generation and doc generation |
-| `src/frontend/views/live-watch.ts` | Live Watch tree provider, leaf variable gathering, MCP listener hooks |
-| `src/frontend/views/live-watch-grapher.ts` | Graph panel lifecycle management |
-| `src/frontend/views/live-watch-logger.ts` | Recording, sanitization and save logic |
-| `resources/live-watch-graph.js` | Canvas 2D rendering engine |
-| `resources/live-watch-graph.html` | Graph panel HTML layout with slider controls |
-| `support/mcp-bridge.js` | External MCP client TCP bridge |
-
-
----
-
-## 6. Licensing / Attribution
-
-### Relationship with Upstream
-
-As the upstream project [`mcu-debug/mcu-debug`](https://github.com/mcu-debug/mcu-debug) is not yet available on the VS Code Marketplace and remains in a phase of rapid internal iteration, several low-level modules (such as remote proxy support and multi-core orchestration) are currently in an "unfinished" or "prototype" state.
-
-**The core philosophy of this fork (MCU-AI-Debug) is:**
-1. **Lean & Stable**: To allow developers to immediately benefit from AI (MCP) integration and UI enhancements (real-time graphing, local recording), we have proactively removed unfinished or unverified upstream components.
-2. **Production Ready**: We focus exclusively on mature, verified features to ensure that this distributed version is a stable "product" ready for daily engineering workflows.
-3. **Active Tracking**: This is not a detached fork. Once an upstream module (such as remote probe support or Capstone-based disassembly) matures and passes rigorous testing, we will merge and adapt it for AI/UI integration.
-
-### Licenses
-
-The upstream project uses a **multi-component license model**:
-
-- **VS Code Extension (TypeScript / Debug Adapter layer)**: MIT License  
-  See: `LICENSE-MIT` (and component-level license notes in `LICENSE`).
-
-- **MCU-Debug Helper (Rust symbol/disassembly server)**: Apache License 2.0  
-  See: `LICENSE-APACHE` (and `packages/mcu-debug-helper/LICENSE`).
-
-Where individual source files include their own license headers, those headers apply. Otherwise, the component-level license applies as described above.
-
-### Disclaimer / non-affiliation
-
-This is an **unofficial fork** and is **not affiliated with or endorsed by** the upstream maintainers.
+This fork is not affiliated with or endorsed by the upstream maintainers. Upstream CLI, proxy, and debugger code remains under its component licenses; see [LICENSE](./LICENSE), [LICENSE-MIT](./LICENSE-MIT), and [LICENSE-APACHE](./LICENSE-APACHE). Fork-specific additions retain their existing licenses and notices.

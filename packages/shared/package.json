@@ -4,25 +4,46 @@
   "private": true,
   "author": "Runze Lee <lhx060906@gmail.com>",
   "main": "./lib/index.js",
-  "types": "./lib/index.d.ts",
+  "types": "./src/index.ts",
   "exports": {
     ".": {
-      "types": "./lib/index.d.ts",
+      "types": "./src/index.ts",
       "require": "./lib/index.js",
       "import": "./lib/index.mjs"
+    },
+    "./cockpit-protocol": {
+      "types": "./src/cockpit-protocol.ts",
+      "require": "./lib/src/cockpit-protocol.js",
+      "import": "./lib/src/cockpit-protocol.js"
+    },
+    "./dasm-helper/*": {
+      "types": "./dasm-helper/*.ts",
+      "require": "./lib/dasm-helper/*.js",
+      "import": "./lib/dasm-helper/*.js"
+    },
+    "./proxy-protocol/*": {
+      "types": "./proxy-protocol/*.ts",
+      "require": "./lib/proxy-protocol/*.js",
+      "import": "./lib/proxy-protocol/*.js"
+    },
+    "./serial-helper/*": {
+      "types": "./serial-helper/*.ts",
+      "require": "./lib/serial-helper/*.js",
+      "import": "./lib/serial-helper/*.js"
     }
   },
   "scripts": {
     "compile": "tsc -p tsconfig.json && node esbuild.js",
     "build": "npm run compile",
-    "watch": "node esbuild.js --watch"
-  },
-  "dependencies": {
-    "proper-lockfile": "^4.1.2"
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc -p tsconfig.json --watch --preserveWatchOutput"
   },
   "devDependencies": {
-    "esbuild": "^0.27.2",
-    "typescript": "^5.0.0"
+    "@types/node": "^25.6.0",
+    "esbuild": "^0.28.0",
+    "npm-run-all": "^4.1.5",
+    "typescript": "6.0.3"
   },
   "engines": {
     "node": ">=18.0.0"

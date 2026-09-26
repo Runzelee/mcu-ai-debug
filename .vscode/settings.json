@@ -1,18 +1,38 @@
 {
     "editor.formatOnSave": true,
     "editor.defaultFormatter": "esbenp.prettier-vscode",
+    // Highlight non-ASCII characters in code files so look-alikes (em dash vs hyphen, curly vs
+    // straight quotes, non-breaking space) are visible as you type. Scoped to code languages on
+    // purpose — Markdown uses emoji deliberately and would be noise. See AGENTS.md.
     "[typescript]": {
         "editor.formatOnSave": true,
-        "editor.defaultFormatter": "esbenp.prettier-vscode"
+        "editor.defaultFormatter": "vscode.typescript-language-features",
+        "editor.unicodeHighlight.nonBasicASCII": true,
+        "editor.unicodeHighlight.includeComments": true
+    },
+    "[rust]": {
+        "editor.unicodeHighlight.nonBasicASCII": true,
+        "editor.unicodeHighlight.includeComments": true
+    },
+    "[json]": {
+        "editor.unicodeHighlight.nonBasicASCII": true
     },
     "[javascript]": {
         "editor.formatOnSave": true,
         "editor.defaultFormatter": "esbenp.prettier-vscode"
     },
     "typescript.tsdk": "node_modules/typescript/lib",
+    "typescript.tsserver.watchOptions": {
+        "excludeDirectories": ["**/node_modules"]
+    },
     "rust-analyzer.linkedProjects": [
-        "packages/mcu-debug-helper/Cargo.toml"
+        "packages/mdbg/Cargo.toml"
     ],
+    // Run clippy (not just `cargo check`) for live in-editor diagnostics, so
+    // lint-level bugs (e.g. #[deny(clippy::...)] violations) show up as you
+    // type instead of only when someone remembers to run `cargo clippy`.
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.check.extraArgs": ["--all-targets"],
     // Rust debugging configuration
     "rust-analyzer.debug.engine": "vadimcn.vscode-lldb",
     "rust-analyzer.debug.engineSettings": {
@@ -20,5 +40,8 @@
     },
     "rust-analyzer.runnables.extraEnv": {
         "RUST_BACKTRACE": "1"
+    },
+    "chat.tools.terminal.autoApprove": {
+        "npm install": true
     }
 }

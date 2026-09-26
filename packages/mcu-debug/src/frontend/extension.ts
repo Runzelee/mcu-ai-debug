@@ -4,30 +4,42 @@
 
 import * as vscode from "vscode";
 import * as path from "path";
+import * as os from "os";
+import * as fs from "fs";
 
-import { MCUDebugChannel } from "../dbgmsgs";
+import { MCUDebugChannel } from "./dbgmsgs";
 import { LiveWatchTreeProvider, LiveVariableNode } from "./views/live-watch";
 import { LiveWatchGrapher } from "./views/live-watch-grapher";
 import { LiveWatchMcpServer } from "./mcp-server";
 import { EditableTreeViewProvider } from "./webview_tree/editable-tree";
+import { CockpitPanel } from "./views/CockpitPanel";
+import { SerialPortManager } from "../common/serial-manager";
 
-import { RTTCore, SWOCore } from "./swo/core";
-import { ConfigurationArguments, RTTCommonDecoderOpts, RTTConsoleDecoderOpts, MCUDebugKeys, ChainedEvents, ChainedConfig } from "../adapter/servers/common";
+import { RTTCore, SWOCore } from "../common/swo/swo-core";
+import { ConfigurationArguments, RTTCommonDecoderOpts, RTTConsoleDecoderOpts, MCUDebugKeys, ChainedEvents, ChainedConfig, SerialConfig, getHelperExecutable } from "../adapter/servers/common";
 import { Reporting } from "../analytics/reporting";
 
-import { CortexDebugConfigurationProvider } from "./configprovider";
-import { JLinkSocketRTTSource, SocketRTTSource, SocketSWOSource, PeMicroSocketSource } from "./swo/sources/socket";
-import { FifoSWOSource } from "./swo/sources/fifo";
-import { FileSWOSource } from "./swo/sources/file";
-import { SerialSWOSource } from "./swo/sources/serial";
-import { UsbSWOSource } from "./swo/sources/usb";
+import { McuDebugConfigurationProvider } from "./configprovider";
+import { VscodeAdapter } from "./vscode-adapter";
+import { setHostAdapter, IDebugSession } from "../common/host-adapter";
+import { JLinkSocketRTTSource, SocketRTTSource, SocketSWOSource, PeMicroSocketSource, SocketUARTSource, SocketIOSource } from "../common/swo/sources/socket";
+import { FifoSWOSource } from "../common/swo/sources/fifo";
+import { FileSWOSource } from "../common/swo/sources/file";
+import { SerialSWOSource } from "../common/swo/sources/serial";
+import { UsbSWOSource } from "../common/swo/sources/usb";
 import { SymbolInformation, SymbolScope } from "../adapter/symbols";
-import { RTTTerminal } from "./rtt_terminal";
-import { GDBServerConsole } from "./server_console";
-import { CDebugSession, CDebugChainedSessionItem } from "./cortex_debug_session";
+import { IOTerminal } from "./io-terminal";
+import { GDBServerConsole } from "./server-console";
+import { CDebugSession, CDebugChainedSessionItem } from "../common/cli-session";
 import { ServerConsoleLog } from "../adapter/server-console-log";
+import { logger } from '../common/logger';
+import { VscodeOutputChannelTransport } from './vscode-transport';
 import { isVarRefGlobalOrStatic } from "../adapter/var-scopes";
-
+import { getWSLNetworkingMode, ProvisioningResults, ProxyProvisionRequest, setDevelopmentModeEnvVars } from "@mcu-debug/shared";
+import { createRTTSource, handleRTTConfigureEvent } from "../common/rtt-source";
+import { AICockpit } from "./ai-cockpit";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "fs";
+import { checkProxyCommand, probeAgentStatusCommand, promptProxyInstallOnce } from "./activate-proxy";
 interface SVDInfo {
     expression: RegExp;
     path: string;
@@ -38,29 +50,76 @@ class ServerStartedPromise {
         public readonly promise: Promise<vscode.DebugSessionCustomEvent>,
         public readonly resolve: any,
         public readonly reject: any,
-    ) {}
+    ) { }
 }
 
 export class MCUDebugExtension {
-    private rttTerminals: RTTTerminal[] = [];
-
     private gdbServerConsole: GDBServerConsole | null = null;
 
     private liveWatchProvider!: LiveWatchTreeProvider;
     private liveWatchWebview!: EditableTreeViewProvider;
     private liveWatchGrapher!: LiveWatchGrapher;
     private liveWatchMcpServer!: LiveWatchMcpServer;
+    private mcpConfigurationTask: Promise<void> = Promise.resolve();
+    public cockpitPanel!: CockpitPanel;
 
     private SVDDirectory: SVDInfo[] = [];
     private functionSymbols: SymbolInformation[] = [];
     private serverStartedEvent: ServerStartedPromise | null = null;
+    private serialPortManager: SerialPortManager;
 
-    constructor(private context: vscode.ExtensionContext) {}
+    constructor(private context: vscode.ExtensionContext) {
+        this.serialPortManager = new SerialPortManager();
+    }
 
     public async initialize() {
         const context: vscode.ExtensionContext = this.context;
         const config = vscode.workspace.getConfiguration("mcu-debug");
-        await this.startServerConsole(context, config.get(MCUDebugKeys.SERVER_LOG_FILE_NAME, "")); // Make this the first thing we do to be ready for the session
+        this.startServerConsole(context, config.get(MCUDebugKeys.SERVER_LOG_FILE_NAME, "")); // Creates the object only; the TCP server is started on first use
+
+        try {
+            // Auto-write/update wrapper scripts
+            this.ensureWrapperScripts(context.extension.extensionPath);
+
+            // Check PATH and prompt if necessary (delayed by 20 seconds)
+            setTimeout(() => {
+                const promptDismissedKey = "mcu-debug.cliPromptDismissed";
+                if (!this.isBinDirInPath() && !context.globalState.get<boolean>(promptDismissedKey, false)) {
+                    vscode.window.showInformationMessage(
+                        "The mcu-debug CLI tools are ready. Would you like to add them to your PATH?",
+                        "Yes",
+                        "No",
+                        "Don't Ask Again"
+                    ).then(selection => {
+                        if (selection === "Yes") {
+                            vscode.commands.executeCommand("mcu-debug.installCli");
+                        } else if (selection === "No") {
+                            return;
+                        } else if (selection === "Don't Ask Again") {
+                            context.globalState.update(promptDismissedKey, true);
+                        }
+                    });
+                }
+            }, 20000);
+        } catch (error) {
+            MCUDebugChannel.debugMessage("Failed to write wrapper files needed by CLI tools: " + error);
+            vscode.window.showWarningMessage("Failed to write wrapper files needed by CLI tools: " + error);
+        }
+
+        this.cockpitPanel = new CockpitPanel(context.extensionUri);
+        AICockpit.getInstance(context);
+        context.subscriptions.push(
+            vscode.window.registerWebviewViewProvider(CockpitPanel.viewId, this.cockpitPanel),
+            vscode.commands.registerCommand("mcu-debug.cockpit.addUart", () => {
+                // TODO: show port picker and call this.cockpitPanel.addTab(new UartManagedTab(...))
+                vscode.window.showInformationMessage("Add UART — not yet implemented");
+            }),
+            // The webview's right-click menu passes back the data-vscode-context of the
+            // element under the pointer, which carries the tab that was clicked.
+            vscode.commands.registerCommand("mcu-debug.cockpit.clear", (menuContext?: { tabId?: string }) => {
+                this.cockpitPanel.clearTab(menuContext?.tabId);
+            }),
+        );
 
         this.liveWatchProvider = new LiveWatchTreeProvider(this.context);
         this.liveWatchWebview = new EditableTreeViewProvider(this.context.extensionUri, this.liveWatchProvider);
@@ -71,22 +130,23 @@ export class MCUDebugExtension {
         this.liveWatchProvider.setUpdateItemsCallback((items) => this.liveWatchWebview.updateComposite(items));
         this.liveWatchProvider.setGrapher(this.liveWatchGrapher);
         
-        const mcpConfig = vscode.workspace.getConfiguration("mcu-ai-debug", null);
-        const mcpPreferredPort = mcpConfig.get<number>("mcpPreferredPort", 51234);
-        const mcpPortSearchRange = mcpConfig.get<number>("mcpPortSearchRange", 100);
-        try {
-            await this.liveWatchMcpServer.start(mcpPreferredPort, mcpPortSearchRange);
-            await this.refreshWorkspaceMcpPortFile(false);
-        } catch (err: any) {
-            vscode.window.showWarningMessage(`MCU-Debug MCP server did not start: ${err?.message ?? String(err)}`);
-        }
+        await this.applyLegacyMcpSetting();
+        context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration("mcu-ai-debug.enableMcp")) {
+                this.mcpConfigurationTask = this.mcpConfigurationTask
+                    .then(() => this.applyLegacyMcpSetting())
+                    .catch((err) => vscode.window.showWarningMessage(`Legacy MCP setting failed: ${err}`));
+            }
+        }));
         context.subscriptions.push({ dispose: () => this.liveWatchMcpServer.dispose() });
 
         context.subscriptions.push(vscode.window.registerWebviewViewProvider("mcu-debug.liveWatch", this.liveWatchWebview));
 
         vscode.commands.executeCommand("setContext", `mcu-debug:${MCUDebugKeys.VARIABLE_DISPLAY_MODE}`, config.get(MCUDebugKeys.VARIABLE_DISPLAY_MODE, true));
 
+        const uriHandler = new MyUriHandler(this.context);
         context.subscriptions.push(
+            vscode.window.registerUriHandler(uriHandler),
             vscode.commands.registerCommand("mcu-debug.varHexModeTurnOn", this.variablesNaturalMode.bind(this, false)),
             vscode.commands.registerCommand("mcu-debug.varHexModeTurnOff", this.variablesNaturalMode.bind(this, true)),
             vscode.commands.registerCommand("mcu-debug.toggleVariableHexFormat", this.toggleVariablesHexMode.bind(this)),
@@ -94,6 +154,19 @@ export class MCUDebugExtension {
             vscode.commands.registerCommand("mcu-debug.examineMemory", this.examineMemory.bind(this)),
 
             vscode.commands.registerCommand("mcu-debug.resetDevice", this.resetDevice.bind(this)),
+            vscode.commands.registerCommand("mcu-debug.pauseAll", this.pauseAll.bind(this)),
+            vscode.commands.registerCommand("mcu-debug.resumeAll", this.resumeAll.bind(this)),
+
+            vscode.commands.registerCommand("mcu-debug.listAvailableSerialPorts", (noDisplay?: boolean) => this.serialPortManager.listAvailablePortsCmd(noDisplay)),
+
+            // Two separate diagnostics, because "proxy" means two things. This one is about the
+            // companion *extension*: is it reachable, and do the versions agree? The answer
+            // cannot be obtained from vscode.extensions in a remote window -- see
+            // activate-proxy.ts -- so this asks the proxy directly.
+            vscode.commands.registerCommand("mcu-debug.checkProxyExtension", () => checkProxyCommand(context)),
+            // ...and this one is about the long-lived `mdbg proxy` daemon (the Probe Agent) on
+            // the machine with the probe, which outlives every window and was invisible from here.
+            vscode.commands.registerCommand("mcu-debug.probeAgentStatus", () => probeAgentStatusCommand(context)),
 
             vscode.commands.registerCommand("mcu-debug.liveWatch.addExpr", this.addLiveWatchExpr.bind(this)),
             vscode.commands.registerCommand("mcu-debug.liveWatch.removeExpr", this.removeLiveWatchExpr.bind(this)),
@@ -110,13 +183,28 @@ export class MCUDebugExtension {
             vscode.commands.registerCommand("mcu-ai-debug.liveWatch.openGraph", this.openLiveWatchGraph.bind(this)),
             vscode.commands.registerCommand("mcu-ai-debug.generateMcpConfig", this.generateMcpConfig.bind(this)),
 
+            vscode.commands.registerCommand("mcu-debug.depositProvision", (data: ProvisioningResults) => this.depositProvision(data)),
+
+            vscode.commands.registerCommand("mcu-debug.cockpit.startDebugSession", (arg: string | undefined) => {
+                AICockpit.getInstance(this.context)?.startDebugSession(arg);
+            }),
+
+            vscode.commands.registerCommand("mcu-debug.installCli", () => {
+                context.globalState.update("mcu-debug.cliPromptDismissed", true);
+                const installerScriptPath = path.join(context.extensionPath, "support", "install-cli.js");
+                const terminal = vscode.window.createTerminal({
+                    name: "mcu-debug CLI Installer",
+                });
+                terminal.sendText(`node "${installerScriptPath}"`);
+                terminal.show();
+            }),
+
             vscode.workspace.onDidChangeConfiguration(this.settingsChanged.bind(this)),
             vscode.debug.onDidReceiveDebugSessionCustomEvent(this.receivedCustomEvent.bind(this)),
             vscode.debug.onDidStartDebugSession(this.debugSessionStarted.bind(this)),
             vscode.debug.onDidTerminateDebugSession(this.debugSessionTerminated.bind(this)),
-            vscode.window.onDidCloseTerminal(this.terminalClosed.bind(this)),
 
-            vscode.debug.registerDebugConfigurationProvider("mcu-debug", new CortexDebugConfigurationProvider(context)),
+            vscode.debug.registerDebugConfigurationProvider("mcu-debug", new McuDebugConfigurationProvider(context, this.serialPortManager)),
         );
     }
 
@@ -129,7 +217,7 @@ export class MCUDebugExtension {
     }
 
     private resetDevice() {
-        let session = MCUDebugExtension.getActiveCDSession();
+        let session: IDebugSession | null = MCUDebugExtension.getActiveCDSession();
         if (session) {
             let mySession = CDebugSession.FindSession(session);
             const parentConfig = mySession?.config?.pvtParent;
@@ -152,14 +240,43 @@ export class MCUDebugExtension {
         }
     }
 
-    private async startServerConsole(context: vscode.ExtensionContext, logFName: string = ""): Promise<void> {
+    private pauseAll() {
+        for (const s of CDebugSession.CurrentSessions) {
+            if (s.status === "running") {
+                s.session.customRequest("pause", { threadId: 1 });
+            }
+        }
+    }
+
+    private resumeAll() {
+        for (const s of CDebugSession.CurrentSessions) {
+            if (s.status === "stopped") {
+                s.session.customRequest("continue", { threadId: 1, singleThread: false });
+            }
+        }
+    }
+
+    private updateSessionContext() {
+        const sessions = CDebugSession.CurrentSessions;
+        vscode.commands.executeCommand("setContext", `mcu-debug:${MCUDebugKeys.CHAINED_SESSIONS_ACTIVE}`, sessions.length > 1);
+        vscode.commands.executeCommand("setContext", `mcu-debug:${MCUDebugKeys.HAS_RUNNING_SESSIONS}`, sessions.some((s) => s.status === "running"));
+        vscode.commands.executeCommand("setContext", `mcu-debug:${MCUDebugKeys.HAS_STOPPED_SESSIONS}`, sessions.some((s) => s.status === "stopped"));
+    }
+
+    /**
+     * Only constructs the console. The TCP server behind it is started lazily, on the first
+     * debug session that asks for its port -- we activate on `onStartupFinished`, so starting it
+     * here would bind a port in every window whether or not it is ever used to debug. A failure
+     * to bind now surfaces from resolveDebugConfiguration(), where it is in context and where the
+     * user can act on it.
+     */
+    private startServerConsole(context: vscode.ExtensionContext, logFName: string = ""): void {
         try {
             this.gdbServerConsole = new GDBServerConsole(context, logFName);
-            await this.gdbServerConsole.startServer();
         } catch (e: any) {
             this.gdbServerConsole?.dispose();
             this.gdbServerConsole = null;
-            vscode.window.showErrorMessage(`Could not create gdb-server-console. Extension startup failed. Please report this problem. ${e.toString()}`);
+            vscode.window.showErrorMessage(`Could not create gdb-server-console. Please report this problem. ${e.toString()}`);
         }
     }
 
@@ -214,7 +331,7 @@ export class MCUDebugExtension {
     private examineMemory() {
         const cmd = "mcu-debug.memory-view.addMemoryView";
         vscode.commands.executeCommand(cmd).then(
-            () => {},
+            () => { },
             (e) => {
                 const installExt = "Install MemoryView Extension";
                 vscode.window
@@ -296,6 +413,7 @@ export class MCUDebugExtension {
         }
 
         const newSession = CDebugSession.NewSessionStarted(session);
+        this.updateSessionContext();
 
         this.functionSymbols = [];
         session.customRequest("get-arguments").then(
@@ -318,7 +436,6 @@ export class MCUDebugExtension {
                 if (Object.keys(newSession.rttPortMap).length > 0) {
                     this.initializeRTT(session, args);
                 }
-                this.cleanupRTTTerminals();
             },
             (error) => {
                 vscode.window.showErrorMessage(`Internal Error: Could not get startup arguments. Many debug functions can fail. Please report this problem. Error: ${error}`);
@@ -354,6 +471,7 @@ export class MCUDebugExtension {
             vscode.window.showInformationMessage(`Debug session did not terminate cleanly ${e}\n${e ? e.stackstrace : ""}. Please report this problem`);
         } finally {
             CDebugSession.RemoveSession(session);
+            this.updateSessionContext();
         }
     }
 
@@ -374,6 +492,9 @@ export class MCUDebugExtension {
                 break;
             case "rtt-configure":
                 this.receivedRTTConfigureEvent(e);
+                break;
+            case "post-initialized":
+                this.receivedPostInitializedEvent(e);
                 break;
             case "record-event":
                 this.receivedEvent(e);
@@ -425,6 +546,11 @@ export class MCUDebugExtension {
             default:
                 break;
         }
+    }
+
+    private receivedPostInitializedEvent(e: vscode.DebugSessionCustomEvent) {
+        // Handle the post-initialized event here
+        this.liveWatchProvider.postInitializeNotification(e);
     }
 
     private signalPortsAllocated(e: vscode.DebugSessionCustomEvent) {
@@ -554,7 +680,7 @@ export class MCUDebugExtension {
                 // vscode.debug.stopDebugging(s.session);
                 ServerConsoleLog(`Sending custom-stop-debugging to ${s.session.name} PID=${process.pid}`);
                 s.session.customRequest("custom-stop-debugging", e.body.info).then(
-                    () => {},
+                    () => { },
                     (reason) => {
                         vscode.window.showErrorMessage(`mcu-debug: Bug? session.customRequest('set-stop-debugging-type', ... failed ${reason}\n`);
                     },
@@ -575,8 +701,8 @@ export class MCUDebugExtension {
                 }
                 if (s.config.pvtMyConfigFromParent.lifecycleManagedByParent) {
                     s.session.customRequest("reset-device", type).then(
-                        () => {},
-                        (reason) => {},
+                        () => { },
+                        (reason) => { },
                     );
                 }
             }, false);
@@ -609,7 +735,7 @@ export class MCUDebugExtension {
         return def;
     }
 
-    private getCurrentArgs(session: vscode.DebugSession): ConfigurationArguments | undefined {
+    private getCurrentArgs(session: IDebugSession | null | undefined): ConfigurationArguments | undefined {
         if (!session) {
             const currentSession = vscode.debug.activeDebugSession;
             if (!currentSession || currentSession.type !== "mcu-debug") {
@@ -625,7 +751,7 @@ export class MCUDebugExtension {
     }
 
     // Assuming 'session' valid and it is a mcu-debug session
-    private isDebugging(session: vscode.DebugSession) {
+    private isDebugging(session: IDebugSession) {
         const args = this.getCurrentArgs(session);
         return args?.noDebug !== true; // If it is exactly equal to 'true' we are doing a 'run without debugging'
     }
@@ -634,6 +760,7 @@ export class MCUDebugExtension {
         const mySession = CDebugSession.FindSession(e.session);
         if (mySession) {
             mySession.status = "stopped";
+            this.updateSessionContext();
             this.liveWatchProvider?.debugStopped(e.session);
             if (mySession.swo) {
                 mySession.swo.debugStopped();
@@ -648,6 +775,7 @@ export class MCUDebugExtension {
         const mySession = CDebugSession.FindSession(e.session);
         if (mySession) {
             mySession.status = "running";
+            this.updateSessionContext();
             this.liveWatchProvider?.debugContinued(e.session);
             if (mySession.swo) {
                 mySession.swo.debugContinued();
@@ -705,92 +833,13 @@ export class MCUDebugExtension {
     }
 
     private receivedRTTConfigureEvent(e: vscode.DebugSessionCustomEvent) {
-        if (e.body.type === "socket") {
-            const decoder: RTTCommonDecoderOpts = e.body.decoder;
-            if (decoder.type === "console" || decoder.type === "binary") {
-                Reporting.sendEvent("RTT", { Source: "Socket= Console" });
-                this.rttCreateTerninal(e, decoder as RTTConsoleDecoderOpts);
-            } else {
-                Reporting.sendEvent("RTT", { Source: `Socket= ${decoder.type}` });
-                if (!decoder.ports) {
-                    this.createRTTSource(e, decoder.tcpPort, decoder.port);
-                } else {
-                    for (let ix = 0; ix < decoder.ports.length; ix = ix + 1) {
-                        // Hopefully ports and tcpPorts are a matched set
-                        this.createRTTSource(e, decoder.tcpPorts[ix], decoder.ports[ix]);
-                    }
-                }
-            }
-        } else {
-            MCUDebugChannel.debugMessage("Error: receivedRTTConfigureEvent: unknown type: " + e.body.type);
-        }
-    }
-
-    // The returned value is a connection source. It may still be in disconnected
-    // state.
-    private createRTTSource(e: vscode.DebugSessionCustomEvent, tcpPort: string, channel: number): Promise<SocketRTTSource> {
         const mySession = CDebugSession.GetSession(e.session);
-        return new Promise((resolve, reject) => {
-            let src = mySession.rttPortMap[channel];
-            if (src) {
-                resolve(src);
-                return;
-            }
-            let decoderSpec = mySession.config.rttConfig?.enabled && mySession.config.rttConfig?.pre_decoder;
-            if (decoderSpec && mySession.config.rttConfig?.useBuiltinRTT?.enabled) {
-                decoderSpec = undefined;
-            }
-            if (mySession.config.servertype === "jlink") {
-                src = new JLinkSocketRTTSource(tcpPort, channel, decoderSpec);
-            } else {
-                src = new SocketRTTSource(tcpPort, channel, decoderSpec);
-            }
-            mySession.rttPortMap[channel] = src; // Yes, we put this in the list even if start() can fail
-            resolve(src); // Yes, it is okay to resolve it even though the connection isn't made yet
-            src.start()
-                .then(() => {
-                    if (!mySession.config.rttConfig?.useBuiltinRTT?.enabled) {
-                        mySession.session.customRequest("rtt-poll");
-                    }
-                })
-                .catch((e) => {
-                    vscode.window.showErrorMessage(`Could not connect to RTT TCP port ${tcpPort} ${e}`);
-                    // reject(e);
-                });
-        });
-    }
-
-    private cleanupRTTTerminals() {
-        this.rttTerminals = this.rttTerminals.filter((t) => {
-            if (!t.inUse) {
-                t.dispose();
-                return false;
-            }
-            return true;
-        });
-    }
-
-    private rttCreateTerninal(e: vscode.DebugSessionCustomEvent, decoder: RTTConsoleDecoderOpts) {
-        this.createRTTSource(e, decoder.tcpPort, decoder.port).then((src: SocketRTTSource) => {
-            for (const terminal of this.rttTerminals) {
-                const success = !terminal.inUse && terminal.tryReuse(decoder, src);
-                if (success) {
-                    if (vscode.debug.activeDebugConsole) {
-                        vscode.debug.activeDebugConsole.appendLine(`Reusing RTT terminal for channel ${decoder.port} on tcp port ${decoder.tcpPort}`);
-                    }
-                    return;
-                }
-            }
-            const newTerminal = new RTTTerminal(this.context, decoder, src);
-            this.rttTerminals.push(newTerminal);
+        handleRTTConfigureEvent(e.body, mySession, (decoder: RTTConsoleDecoderOpts, src: SocketRTTSource) => {
+            const newTerminal = new IOTerminal(decoder, src);
             if (vscode.debug.activeDebugConsole) {
                 vscode.debug.activeDebugConsole.appendLine(`Created RTT terminal for channel ${decoder.port} on tcp port ${decoder.tcpPort}`);
             }
         });
-    }
-
-    private terminalClosed(terminal: vscode.Terminal) {
-        this.rttTerminals = this.rttTerminals.filter((t) => t.terminal !== terminal);
     }
 
     private initializeSWO(session: vscode.DebugSession, args: ConfigurationArguments) {
@@ -858,37 +907,210 @@ export class MCUDebugExtension {
         this.liveWatchProvider.moveDownNode(node);
     }
 
-    private addSelectionToLiveWatch() {
-        const editor = vscode.window.activeTextEditor;
-        if (editor) {
-            const selection = editor.selection;
-            const text = editor.document.getText(selection).trim();
-            if (text) {
-                this.liveWatchProvider.addWatchExpr(text);
-            } else {
-                const wordRange = editor.document.getWordRangeAtPosition(selection.active);
-                if (wordRange) {
-                    const word = editor.document.getText(wordRange);
-                    this.liveWatchProvider.addWatchExpr(word);
+    private ensureWrapperScripts(extensionPath: string) {
+        const binDir = path.join(os.homedir(), ".mcu-debug", "bin");
+        try {
+            mkdirSync(binDir, { recursive: true });
+
+            const serverExePath = getHelperExecutable(extensionPath);
+            if (!existsSync(serverExePath)) {
+                MCUDebugChannel.debugMessage(`Wrapper script creation failed. Missing mdbg executable at ${serverExePath}`);
+                return;
+            }
+            const fSlashPath = serverExePath.replace(/\\/g, "/");
+
+            // macOS & Linux wrapper
+            const bashWrapperPath = path.join(binDir, "mcu-debug");
+            const bashContent = `#!/usr/bin/env bash
+exec "${fSlashPath}" "\$@"
+`;
+
+            // Windows wrapper
+            const winWrapperPath = path.join(binDir, "mcu-debug.cmd");
+            const windowsExtPath = path.normalize(fSlashPath);
+            const winContent = `@"${windowsExtPath}" %*
+`;
+
+            this.writeIfDifferent(bashWrapperPath, bashContent, true);
+            this.writeIfDifferent(winWrapperPath, winContent, false);
+        } catch (error) {
+            MCUDebugChannel.debugMessage(`Failed to create wrapper scripts directory: ${error}`);
+        }
+    }
+
+    private writeIfDifferent(filePath: string, content: string, setExecutable: boolean) {
+        let shouldWrite = true;
+        if (existsSync(filePath)) {
+            try {
+                const existing = readFileSync(filePath, "utf8");
+                if (existing === content) {
+                    shouldWrite = false;
+                }
+            } catch { }
+        }
+        if (shouldWrite) {
+            try {
+                writeFileSync(filePath, content, { mode: setExecutable ? 0o755 : undefined });
+            } catch (error) {
+                MCUDebugChannel.debugMessage(`Failed to write wrapper script ${filePath}: ${error}`);
+            }
+        }
+    }
+
+    private isBinDirInPath(): boolean {
+        const binDir = path.resolve(os.homedir(), ".mcu-debug", "bin").toLowerCase();
+        const paths = (process.env.PATH || "").split(path.delimiter);
+        for (const p of paths) {
+            try {
+                if (path.resolve(p).toLowerCase() === binDir) {
+                    return true;
+                }
+            } catch { }
+        }
+        return false;
+    }
+
+    private depositProvision(data: ProvisioningResults) {
+        const toLower = (s: string) => {
+            if (os.platform() === "win32") {
+                return s.toLowerCase();
+            }
+            return s;
+        }
+        const platPath = toLower(data?.resultsFile || "");
+        if (!platPath || !platPath.startsWith(toLower(os.tmpdir()))) {
+            MCUDebugChannel.debugMessage(`Error: resultsFile must be in the temporary directory. Provisioning results deposited at: ${data.resultsFile}`);
+            return
+        }
+        try {
+            fs.writeFileSync(data.resultsFile, JSON.stringify(data), { encoding: "utf8" });
+            MCUDebugChannel.debugMessage(`Provisioning results deposited at: ${data.resultsFile}`);
+        } catch (error) {
+            MCUDebugChannel.debugMessage(`Error writing provisioning results to file: ${error}`);
+        }
+    }
+}
+
+function logTmp(msg: string) {
+    const tmpFile = os.tmpdir() + "/mcu-debug-uri.log";
+    const currentTime = new Date().toLocaleString();
+    fs.appendFileSync(tmpFile, currentTime + ": " + msg + "\n");
+}
+
+class MyUriHandler implements vscode.UriHandler {
+    constructor(private context: vscode.ExtensionContext) {
+        // Nothing to do in the constructor for now
+    }
+    // This function will get run when something redirects to VS Code
+    // with your extension id as the authority.
+    handleUri(uri: vscode.Uri): vscode.ProviderResult<void> {
+        // vscode.window.showInformationMessage(`[mcu-debug] handleUri called with URI: ${uri.toString()}`);
+        logTmp(`[mcu-debug] handleUri called with URI: ${uri.toString()}`);
+        if ((uri.path === "/provision") && uri.query) {
+            // The request is one JSON param (`req`) so every field keeps its real
+            // type — `v` is a number, `args` is an array. (URLSearchParams would
+            // otherwise String()-coerce everything to strings / "[object Object]".)
+            // A `const` (via IIFE) so the narrowing below survives into the async
+            // `.then()` closures where `obj` is used.
+            const obj: ProxyProvisionRequest | undefined = (() => {
+                const raw = new URLSearchParams(uri.query).get("req");
+                if (!raw) {
+                    return undefined;
+                }
+                try {
+                    return JSON.parse(raw) as ProxyProvisionRequest;
+                } catch {
+                    return undefined; // malformed JSON → treat as no valid request
+                }
+            })();
+            logTmp(`[mcu-debug] handleUri parsed request: ${JSON.stringify(obj)}`);
+            if (obj && obj.v === 1 && obj.api && obj.resultsFile) {
+                let error = "";
+                const cmd = `mcu-debug-proxy.${obj.api}`;
+                try {
+                    const args = obj.args || [];
+                    vscode.commands.executeCommand(cmd, ...args).then((res) => {
+                        if (res) {
+                            this.depositProvision(obj, "", res);
+                        } else {
+                            this.depositProvision(obj, `No result returned from command: ${cmd}`, undefined);
+                        }
+                    })
+                } catch (e) {
+                    this.depositProvision(obj, cmd + ': Error: ' + (e ? e.toString() : "unknown error"), undefined);
                 }
             }
         }
     }
 
-    private startLiveWatchRecording() {
-        this.liveWatchProvider.startRecording();
+    private depositProvision(obj: ProxyProvisionRequest, error: string, result: any) {
+        const results: ProvisioningResults = {
+            resultsFile: obj.resultsFile,
+            error: error,
+            result: result,
+        };
+        logTmp(`[mcu-debug] handleUri parsed request: ${JSON.stringify(obj)}`);
+        vscode.commands.executeCommand("mcu-debug.depositProvision", results).then((reason) => {
+            logTmp(`[mcu-debug] depositProvision completed: ${reason}`);
+        });
     }
 
-    private saveLiveWatchSnapshot() {
-        this.liveWatchProvider.saveSnapshot();
-    }
+    public validateAuthority(authority: string): Promise<boolean> {
+        return new Promise<boolean>(async (resolve) => {
+            let resolved = false;
+            let permissions = this.context.globalState.get<string[]>("mcu-debug-proxy.authorizedAuthorities", []);
+            if (permissions.includes(authority)) {
+                return resolve(true);
+            }
+            const timer = setTimeout(() => {
+                if (!resolved) {
+                    resolved = true;
+                    return resolve(false);
+                }
+            }, 30_000); // 30 seconds timeout for user to respond
+            const choices = ["Deny", "Allow", "Always Allow"];
+            const result = await vscode.window.showWarningMessage(
+                `The authority "${authority}" is requesting access to the MCU Debug Proxy. Do you want to allow it?`,
+                { modal: true },
+                ...choices
+            );
 
-    private stopLiveWatchRecording() {
-        this.liveWatchProvider.stopRecording();
+            if (result === choices[1] || result === choices[2]) {
+                if (result === choices[2]) {
+                    permissions.push(authority);
+                    this.context.globalState.update("mcu-debug-proxy.authorizedAuthorities", permissions);
+                }
+                if (!resolved) {
+                    clearTimeout(timer);
+                    resolved = true;
+                    return resolve(true);
+                }
+            }
+            if (!resolved) {
+                clearTimeout(timer);
+                resolved = true;
+                return resolve(false);
+            }
+        });
     }
-
-    private openLiveWatchGraph() {
-        this.liveWatchGrapher.openGraph(() => this.liveWatchProvider.gatherLeafExprs());
+    private async applyLegacyMcpSetting(): Promise<void> {
+        const config = vscode.workspace.getConfiguration("mcu-ai-debug");
+        if (!config.get<boolean>("enableMcp", false)) {
+            this.liveWatchMcpServer.dispose();
+            return;
+        }
+        if (this.liveWatchMcpServer.getPort() !== null) {
+            return;
+        }
+        try {
+            await this.liveWatchMcpServer.start(
+                config.get<number>("mcpPreferredPort", 51234),
+                config.get<number>("mcpPortSearchRange", 100),
+            );
+            await this.refreshWorkspaceMcpPortFile(false);
+        } catch (err: any) {
+            vscode.window.showWarningMessage(`Legacy MCP server did not start: ${err?.message ?? String(err)}`);
+        }
     }
 
     private getMcpPortFilePath(vscodeDir: string): string {
@@ -935,6 +1157,10 @@ export class MCUDebugExtension {
     }
 
     private async generateMcpConfig() {
+        if (!vscode.workspace.getConfiguration("mcu-ai-debug").get<boolean>("enableMcp", false) || !this.liveWatchMcpServer.getPort()) {
+            vscode.window.showInformationMessage("Legacy MCP is disabled. Enable mcu-ai-debug.enableMcp in Settings first.");
+            return;
+        }
         const bridgePath = path.join(this.context.extensionPath, "support", "mcp-bridge.js");
         const nodeCmd = process.execPath; // VS Code's embedded Node.js binary
 
@@ -993,7 +1219,7 @@ export class MCUDebugExtension {
                 // Generic format: .vscode/mcu-debug-mcp.json
                 const genericPath = path.join(vscodeDir, "mcu-debug-mcp.json");
                 const genericConfig = this.buildGenericConfig(nodeCmd, bridgePath, { portFile: portFilePath ?? undefined, port: this.liveWatchMcpServer.getPort() ?? 51234 });
-                const content = `// Automatically generated by MCU-Debug\n// Copy this into your AI agent's MCP configuration (e.g. Antigravity, Cursor Settings, Claude Desktop config, etc.)\n// See details in "For humans" section of .vscode/mcp-debug-mcp.md\n\n${JSON.stringify(genericConfig, null, 2)}\n`;
+                const content = `// Deprecated MCP compatibility configuration, generated by MCU-AI-Debug\n// Copy this into your AI agent's MCP configuration if you still use the legacy bridge.\n// See .vscode/mcu-debug-mcp.md for details.\n\n${JSON.stringify(genericConfig, null, 2)}\n`;
                 await vscode.workspace.fs.writeFile(vscode.Uri.file(genericPath), Buffer.from(content, "utf8"));
                 const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(genericPath));
                 await vscode.window.showTextDocument(doc);
@@ -1035,7 +1261,9 @@ export class MCUDebugExtension {
     private async generateMcpDoc(vscodeDir: string) {
         const docPath = path.join(vscodeDir, "mcu-debug-mcp.md");
         const docStr = [
-            "# MCU-Debug MCP Tool Reference",
+            "# MCU-Debug MCP Tool Reference (Deprecated)",
+            "",
+            "> This legacy integration is opt-in. The mcu-debug CLI is the supported AI interface; use these tools only when `mcu-ai-debug.enableMcp` is enabled.",
             "",
             "> **If you are an AI assistant reading this file: STOP. Do NOT browse the MCU-Debug source code or write any Python/Node.js scripts to read debug variables. You already have direct native MCP tools. Use them.**",
             "",
@@ -1114,7 +1342,7 @@ export class MCUDebugExtension {
             "",
             "**Important behavior**:",
             '- This tool will **block for a long time** while waiting for the user to physically interact with their hardware and click buttons. This is completely normal. Do NOT abort or time out early.',
-            "- The maximum wall-clock time is controlled by the user's `mcu-debug.mcpManualRecordingMaxDuration` setting (default: 60s).",
+            "- The maximum wall-clock time is controlled by the user's `mcu-ai-debug.mcpManualRecordingMaxDuration` setting (default: 60s).",
             "",
             "**Output** (JSON):",
             "| status | Description |",
@@ -1154,6 +1382,7 @@ export class MCUDebugExtension {
             "",
             "| Setting | Type | Default | Description |",
             "|---|---|---|---|",
+            "| `mcu-ai-debug.enableMcp` | boolean | false | Enable the deprecated MCP bridge. |",
             "| `mcu-ai-debug.mcpRequireManualRecording` | boolean | false | If enabled, `record_livewatch_variables` returns `MANUAL_MODE_REQUIRED` and agents must use the manual tool. |",
             "| `mcu-ai-debug.mcpRecordingMaxDuration` | number | 30 | Max recording duration in seconds for automatic mode. |",
             "| `mcu-ai-debug.mcpManualRecordingMaxDuration` | number | 60 | Max recording duration in seconds for manual mode. |",
@@ -1167,24 +1396,52 @@ export class MCUDebugExtension {
 
 export async function activate(context: vscode.ExtensionContext) {
     try {
+        console.log("[mcu-debug] Activating mcu-debug extension");
+        if (context.extensionMode === vscode.ExtensionMode.Development) {
+            console.log("[mcu-debug] Running in development mode");
+            setDevelopmentModeEnvVars();
+        }
+        setHostAdapter(new VscodeAdapter(context));
         Reporting.activateTelemetry(context);
         MCUDebugChannel.createDebugChannel();
+        logger.add(new VscodeOutputChannelTransport(MCUDebugChannel.outputChannel, { level: 'debug' }));
+
+        // Nudge the user to install the companion proxy extension before anything depends on
+        // it -- the failure this avoids is discovering it is missing at the moment F5 is
+        // pressed. Fire-and-forget so activation is never held up by a dialog; it remembers a
+        // "Don't Ask Again" and stays quiet once the proxy answers.
+        promptProxyInstallOnce(context).catch((err) => {
+            logger.error(`MCU-Debug Proxy install prompt failed: ${err}`);
+        });
+
         const packageJson = context.extension.packageJSON;
         const version = packageJson.version || "unknown";
         MCUDebugChannel.debugMessage(`Starting mcu-debug extension. Version = ${version}, Path = ${context.extensionPath}, PID=${process.pid}`);
-        MCUDebugChannel.debugMessage(`Workspace location type: ${vscode.env.remoteName ? vscode.env.remoteName : "local"}`);
+        let wsType = vscode.env.remoteName ?? "local";
+        if (wsType === "wsl") {
+            wsType += '-' + getWSLNetworkingMode();
+        }
+        MCUDebugChannel.debugMessage(`Workspace location type: ${wsType}`);
         if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
-            MCUDebugChannel.debugMessage(`Extension startup workspace: ${vscode.workspace.name}, folders:\n  ${vscode.workspace.workspaceFolders.map((f) => f.name).join(",\n  ")}`);
-            MCUDebugChannel.debugMessage(`Workspace URI:\n  ${vscode.workspace.workspaceFolders.map((f) => f.uri.toString()).join(",\n  ")}`);
+            MCUDebugChannel.debugMessage(`Extension startup workspace: ${vscode.workspace.name}, folders:\n  ${vscode.workspace.workspaceFolders?.map((f) => f.name).join(",\n  ")}`);
+            MCUDebugChannel.debugMessage(`Workspace URI:\n  ${vscode.workspace.workspaceFolders?.map((f) => f.uri.toString()).join(",\n  ")}`);
         } else {
             MCUDebugChannel.debugMessage("Extension startup: No workspace");
         }
     } catch (_e) {
         /* empty */
     }
+
     const ret = new MCUDebugExtension(context);
-    await ret.initialize();
+    try {
+        await ret.initialize();
+    } catch (e) {
+        console.error(e);
+        vscode.window.showErrorMessage(`mcu-debug: Extension initialization failed. Some features may not work. Error: ${e}`);
+    }
     return ret;
 }
 
-export async function deactivate() {}
+export async function deactivate() {
+    SerialPortManager.Dispose();
+}

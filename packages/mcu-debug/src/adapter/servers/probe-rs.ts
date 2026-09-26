@@ -25,7 +25,7 @@ export class ProbeRsServerController extends EventEmitter implements GDBServerCo
         const gdbport = this.ports[createPortName(this.args.targetProcessor)].localPort;
 
         return [
-            `target-select extended-remote localhost:${gdbport}`,
+            `target-select extended-remote 127.0.0.1:${gdbport}`,
             // Following needed for SWO and accessing some peripherals.
             // Generally not a good thing to do
             'interpreter-exec console "set mem inaccessible-by-default off"',
@@ -33,7 +33,10 @@ export class ProbeRsServerController extends EventEmitter implements GDBServerCo
     }
 
     public launchCommands(): string[] {
-        const commands = [...genDownloadCommands(this.args, ['interpreter-exec console "monitor reset halt"']), 'interpreter-exec console "monitor reset halt"'];
+        const commands = [
+            ...genDownloadCommands(this.args, ['interpreter-exec console "monitor reset halt"']),
+            'interpreter-exec console "monitor reset halt"',
+        ];
         return commands;
     }
 
@@ -102,9 +105,9 @@ export class ProbeRsServerController extends EventEmitter implements GDBServerCo
         return /Firing up GDB/;
     }
 
-    public serverLaunchStarted(): void {}
-    public serverLaunchCompleted(): void {}
+    public serverLaunchStarted(): void { }
+    public serverLaunchCompleted(): void { }
 
-    public debuggerLaunchStarted(): void {}
-    public debuggerLaunchCompleted(): void {}
+    public debuggerLaunchStarted(): void { }
+    public debuggerLaunchCompleted(): void { }
 }

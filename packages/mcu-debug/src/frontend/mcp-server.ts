@@ -14,6 +14,7 @@ export class LiveWatchMcpServer {
     private port: number | null = null;
     private startPromise: Promise<number> | null = null;
     private readonly mcpServers = new Set<Server>();
+    private readonly clients = new Set<net.Socket>();
     private liveWatchProvider: LiveWatchTreeProvider;
 
     constructor(liveWatchProvider: LiveWatchTreeProvider) {
@@ -36,6 +37,7 @@ export class LiveWatchMcpServer {
 
     private createTcpServer(): net.Server {
         return net.createServer((socket) => {
+            this.clients.add(socket);
             const port = this.port ?? "unknown";
             console.log("MCP Client connected to MCU-Debug on TCP port", port);
 
@@ -53,6 +55,7 @@ export class LiveWatchMcpServer {
             });
             
             socket.on("close", () => {
+                this.clients.delete(socket);
                 console.log("MCP Client disconnected from MCU-Debug");
                 transport.close();
                 mcpServer.close();
@@ -361,9 +364,18 @@ export class LiveWatchMcpServer {
     }
 
     public dispose() {
-        if (this.server) {
-            this.server.close();
+        for (const client of this.clients) {
+            client.destroy();
         }
+        this.clients.clear();
+        try {
+            this.server?.close();
+        } catch {
+            // A failed start may have already closed the listener.
+        }
+        this.server = null;
+        this.port = null;
+        this.startPromise = null;
         for (const mcpServer of this.mcpServers) {
             mcpServer.close();
         }

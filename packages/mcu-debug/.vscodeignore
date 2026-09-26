@@ -27,5 +27,5 @@ tmp/**
 **/tmp/**
 **/.#*
 **/*~
-# Do not ignore bin directory - it contains the required Rust helper binaries
-!bin/**
+bin/mdbg*
+bin/mcu-debug-helper*

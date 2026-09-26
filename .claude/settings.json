@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(npm run compile:*)",
+      "Bash(cargo run:*)",
+      "Bash(cargo check:*)",
+      "Bash(bash scripts/build-binaries.sh prod)",
+      "Bash(wait)",
+      "WebSearch",
+      "Bash(npm --version)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(node esbuild.js)",
+      "Bash(npx tsc-strict *)",
+      "Bash(xargs ls *)",
+      "Bash(npx tsc *)",
+      "Bash(xargs cat -n)",
+      "Bash(git fetch *)",
+      "WebFetch(domain:probe.rs)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}

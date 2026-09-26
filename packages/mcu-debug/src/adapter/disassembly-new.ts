@@ -34,7 +34,7 @@ import { GdbInstance } from "./gdb-mi/gdb-instance";
 import { GDBDebugSession } from "./gdb-session";
 import { SymbolInformation, SymbolTable, SymbolType, SymbolNode, MemoryRegion } from "./symbols";
 import { TargetArchitecture, TargetInfo, TargetMemoryRegion, TargetMemoryRegions } from "./target-info";
-import { formatAddress, formatAddress32, formatAddress64, parseAddress, parseAddressCleaned } from "../frontend/utils";
+import { formatAddress, formatAddress32, formatAddress64, parseAddress, parseAddressCleaned } from "../common/utils";
 import { Stdout } from "./gdb-mi/mi-types";
 import { SortedArray } from "sorted-array-type";
 import { start } from "node:repl";
@@ -90,7 +90,7 @@ export class DisassemblyAdapterNew {
     }
 
     // This should be called after the symbol table and the target info are initialized
-    initialize(): void {
+    initialize() {
         const archType = TargetInfo.Instance!.getArchitectureType();
         this.instrInfo = InstructionSizes.get(archType);
         this.debugDisassembly = this.session.args.debugFlags?.debugDisassembly ?? false;

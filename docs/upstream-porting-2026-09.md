@@ -1,5 +1,7 @@
 # Upstream Porting Status - 2026-09-12
 
+> Historical review. The CLI deferral below was superseded by [the 2026-09-26 integration](./upstream-porting-2026-09-26.md).
+
 This document continues `docs/upstream-porting-2026-06.md` and records the
 third selective upstream review from `mcu-debug/mcu-debug` into this fork.
 

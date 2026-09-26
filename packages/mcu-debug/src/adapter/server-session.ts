@@ -1,8 +1,6 @@
 import { EventEmitter } from "events";
 import * as child_process from "child_process";
 import * as net from "net";
-import * as fs from "fs";
-import path from "path";
 import { JLinkServerController } from "./servers/jlink";
 import { OpenOCDServerController } from "./servers/openocd";
 import { STUtilServerController } from "./servers/stutil";
@@ -13,10 +11,10 @@ import { PEServerController } from "./servers/pemicro";
 import { QEMUServerController } from "./servers/qemu";
 import { ExternalServerController } from "./servers/external";
 import { GDBDebugSession } from "./gdb-session";
-import { ConfigurationArguments, createPortName, GDBServerController, GenericCustomEvent, quoteShellCmdLine, TcpPortDef, TcpPortDefMap } from "./servers/common";
+import { createPortName, GDBServerController, GenericCustomEvent, quoteShellCmdLine, TcpPortDef, TcpPortDefMap } from "./servers/common";
 import { GdbEventNames, Stderr } from "./gdb-mi/mi-types";
-import { TcpPortScanner } from "@mcu-debug/shared";
-import { greenFormat } from "../frontend/ansi-helpers";
+import { DefaultPortBase, TcpPortScanner } from "@mcu-debug/shared";
+import { AnsiHelpers } from "../common/ansi-helpers";
 import { ProxyClient } from "./proxy-client";
 import { ProbeRsServerController } from "./servers/probe-rs";
 
@@ -33,34 +31,6 @@ const SERVER_TYPE_MAP: { [key: string]: any } = {
     external: ExternalServerController,
 };
 
-export function getEnvFromConfig(args: ConfigurationArguments): { [key: string]: string } {
-    const env = args.env ? { ...args.env } : {};
-    if (args.envFile) {
-        try {
-            const contents = fs.readFileSync(args.envFile, "utf-8");
-            const envLines = contents.split("\n");
-            envLines.forEach((line) => {
-                line = line.trim();
-                if (!line || line.startsWith("#")) {
-                    return;
-                }
-                const ix = line.indexOf("=");
-                if (ix > 0) {
-                    const key = line.substring(0, ix).trim();
-                    const value = line.substring(ix + 1).trim();
-                    if (key) {
-                        env[key] = value;
-                    }
-                }
-            });
-        } catch (e: any) {
-            // Ignore errors in reading env file, just log
-            console.error(`Could not load environment variables from file: ${e.message}`);
-        }
-    }
-    return env;
-}
-
 export class GDBServerSession extends EventEmitter {
     public serverController: GDBServerController;
     private process: child_process.ChildProcess | null = null;
@@ -69,6 +39,8 @@ export class GDBServerSession extends EventEmitter {
     public usingParentServer: boolean = false;
     private clientRequestedStop: boolean = false;
     private proxyClient: ProxyClient | null = null;
+    private serverResolve: (() => void) | null = null;
+    private resolved: boolean = false;  // Could be resolved or rejected, but we just want to know if it's resolved in any way to stop timers and avoid multiple resolve/reject calls
 
     constructor(private session: GDBDebugSession) {
         super();
@@ -118,17 +90,23 @@ export class GDBServerSession extends EventEmitter {
         const executable = this.usingParentServer ? null : this.serverController.serverExecutable();
         const args = this.usingParentServer ? [] : this.serverController.serverArguments();
         this.session.sendEvent(new GenericCustomEvent("ports-done", undefined)); // Should be no more TCP ports allocation
+        // Our port reservations are live listening sockets. Nothing below this point allocates,
+        // and everything below this point needs to actually bind those ports, so give them back
+        // now. They stay in TcpPortScanner.AvoidPorts, and the frontend hands them to sibling
+        // sessions via pvtAvoidPorts, so nobody re-uses them while this session lives.
+        await TcpPortScanner.releaseHeldPorts();
 
         if (!executable) {
             return;
         }
 
-        const serverCwd = this.getServerCwd(executable);
+        const serverCwd = this.getServerCwd();
         return new Promise<void>(async (resolve, reject) => {
             // Connect to the frontend console
-            if (this.session.args.gdbServerConsolePort) {
+            this.serverResolve = resolve;
+            if (this.session.args.pvtGdbServerConsolePort) {
                 try {
-                    await this.connectConsole(this.session.args.gdbServerConsolePort);
+                    await this.connectConsole(this.session.args.pvtGdbServerConsolePort);
                 } catch (e: any) {
                     this.session.handleMsg(GdbEventNames.Stderr, `Could not connect to debug console: ${e.message}\n`);
                     reject(e);
@@ -137,34 +115,38 @@ export class GDBServerSession extends EventEmitter {
             }
 
             const argsStr = quoteShellCmdLine([executable]) + " " + args.map((a) => quoteShellCmdLine([a])).join(" ") + "\n ";
-            this.session.handleMsg(GdbEventNames.Console, `Starting GDB-Server: ${argsStr}`);
-            this.consoleSocket?.write(greenFormat(argsStr));
-            const matchRegex = this.serverController.initMatch();
+            this.session.handleMsg(GdbEventNames.Stdout, `Starting GDB-Server: ${argsStr}`);
+            if (!this.session.args.pvtIsCli) {
+                this.consoleSocket?.write(AnsiHelpers.greenFormat(argsStr));
+            }
+            this.matchRegex = this.serverController.initMatch();
 
             if (this.proxyClient) {
-                this.session.handleMsg(Stderr, "Starting gdb-server via proxy...\n");
+                this.session.handleMsg(GdbEventNames.Stdout, "Starting gdb-server via proxy...\n");
                 try {
                     this.proxyClient.on("streamStarted", (data: TcpPortDef) => {
                         if (data.name.startsWith("gdb")) {
-                            this.session.handleMsg(Stderr, `GDB-Server stream ready on port server ${data.remotePort}\n`);
-                            resolved = true;
-                            resolve();
+                            this.session.handleMsg(GdbEventNames.Stdout, `GDB-Server stream ready on port server ${data.remotePort}\n`);
+                            this.serverResolve?.();
+                            this.serverResolve = null;
+                            this.resolved = true;
                         }
                     });
                     this.proxyClient?.on("serverExited", (code: number, signal: NodeJS.Signals) => {
                         serverExited(code, signal);
                     });
-                    await this.proxyClient.launchServer(executable, args, serverCwd, matchRegex ? [matchRegex] : []);
+                    await this.proxyClient.launchServer(executable, args);
                 } catch (e: any) {
                     reject(new Error(`Failed to launch gdb-server via proxy: ${e.message}`));
                     return;
                 }
             } else {
-                const env = { ...process.env, ...getEnvFromConfig(this.session.args) };
+                const env = { ...process.env, ...(this.session.args.env || {}) };
                 this.process = child_process.spawn(executable, args, {
                     cwd: serverCwd,
                     env: env,
-                    detached: true,
+                    stdio: "pipe",
+                    windowsHide: true
                 });
             }
 
@@ -172,7 +154,6 @@ export class GDBServerSession extends EventEmitter {
 
             let timer: NodeJS.Timeout | null = null;
             let timeout: NodeJS.Timeout | null = null;
-            let resolved = false;
             const killTimers = () => {
                 if (timer) {
                     clearInterval(timer);
@@ -184,7 +165,7 @@ export class GDBServerSession extends EventEmitter {
                 }
             };
 
-            if (!matchRegex && !this.proxyClient) {
+            if (!this.matchRegex && !this.proxyClient) {
                 const timeoutMs = 2000;
                 const serverType = this.session.args.servertype || "openocd";
                 const gdbport = this.ports["gdbPort"]?.localPort;
@@ -197,76 +178,53 @@ export class GDBServerSession extends EventEmitter {
                     setTimeout(() => {
                         // No match needed, resolve immediately
                         this.serverController.serverLaunchCompleted();
-                        resolved = true;
+                        this.resolved = true;
                         resolve();
                     }, timeoutMs);
                 }
             } else {
-                let count = 0;
-                const gdbPortNm = createPortName(this.session.args.targetProcessor || 0, "gdbPort");
-                const gdbport = this.ports[gdbPortNm]?.localPort;
-                const isWindows = process.platform === "win32";
-
-                timer = setInterval(async () => {
-                    if (resolved || this.clientRequestedStop) {
+                const now = Date.now();
+                timer = setInterval(() => {
+                    if (this.resolved || this.clientRequestedStop) {
                         killTimers();
-                        return;
-                    }
-                    this.session.handleMsg(GdbEventNames.Console, `Waiting for gdb-server to start ${++count}...\n`);
-                    
-                    // Fallback: If the GDB port is already listening, assume server is ready even if regex fails
-                    if (gdbport && !this.proxyClient) {
-                        if (await isPortListening(gdbport, 1000)) {
-                            this.session.handleMsg(GdbEventNames.Console, `GDB-Server port ${gdbport} is listening (Fallback). Proceeding...\n`);
-                            resolved = true;
-                            killTimers();
-                            this.serverController.serverLaunchCompleted();
-                            resolve();
+                    } else {
+                        const elapsed = Math.round((Date.now() - now) / 1000);
+                        if (this.matchRegex) {
+                            this.session.handleMsg(GdbEventNames.Stderr, `Waiting for gdb-server to output line matching regex ${this.matchRegex} (${elapsed}s elapsed)...\n`);
+                        } else {
+                            this.session.handleMsg(GdbEventNames.Stderr, `Waiting for gdb-server to start (${elapsed}s elapsed)...\n`);
                         }
                     }
-                }, 2000);
+                }, 5000);
 
-                timeout = setTimeout(
-                    () => {
-                        if (this.process) {
-                            this.process.kill();
+                timeout = setTimeout(() => {
+                    timeout = null;
+                    killTimers();
+                    if (this.process) {
+                        if (this.session.args.debugFlags.anyFlags) {
+                            this.session.handleMsg(Stderr, "Stopping gdb-server process...\n");
                         }
-                        if (!resolved) {
-                            resolved = true;
-                            reject(new Error("Timeout waiting for gdb-server to start"));
-                        }
-                    },
-                    2 * 60 * 1000, // Reduced from 5 min to 2 min
-                );
+                        this.process.kill();
+                        this.process = null;
+                    }
+                    if (!this.resolved) {
+                        this.resolved = true;
+                        reject(new Error("Timeout waiting for gdb-server to start"));
+                    }
+                }, 5 * 60 * 1000);
             }
 
             if (this.process) {
-                let outputBuffer = "";
-                const handleOutput = (data: Buffer) => {
-                    this.writeToConsole(data);
-
-                    if (matchRegex && !resolved) {
-                        outputBuffer += data.toString();
-                        if (matchRegex.test(outputBuffer)) {
-                            resolved = true;
-                            killTimers();
-                            this.serverController.serverLaunchCompleted();
-                            resolve();
-                        }
-                        // Keep only the last 2000 characters to avoid memory issues while handling split chunks
-                        if (outputBuffer.length > 2000) {
-                            outputBuffer = outputBuffer.slice(-1000);
-                        }
-                    }
-                };
-                this.process.stdout?.on("data", handleOutput);
-                this.process.stderr?.on("data", handleOutput);
+                // If we are in CLI mode, both gdb and servers output goes to the same console. So it would create
+                // duplicaes if we write both to console. So only write server output to console when not in CLI mode.
+                const doConsoleForStdout = this.session.args.pvtIsCli && !(this.session.args.pvtCliOptions as any)?.showServerOutput ? false : true;
+                this.process.stdout?.on("data", (data) => this.handleStdout(data, doConsoleForStdout));
+                this.process.stderr?.on("data", (data) => this.handleStderr(data, true));
 
                 this.process.on("error", (err) => {
                     killTimers();
-                    if (!resolved) {
-                        resolved = true;
-                        timeout && clearTimeout(timeout);
+                    if (!this.resolved) {
+                        this.resolved = true;
                         reject(err);
                     }
                 });
@@ -278,8 +236,11 @@ export class GDBServerSession extends EventEmitter {
 
             const serverExited = (code: number | null, signal: NodeJS.Signals | null) => {
                 killTimers();
-                if (!resolved) {
-                    resolved = true;
+                if (this.session.args.debugFlags.anyFlags) {
+                    this.session.handleMsg(Stderr, `Gdb-server process exited...${code !== null ? ` with code ${code}` : ""}${signal !== null ? ` with signal ${signal}` : ""}\n`);
+                }
+                if (!this.resolved) {
+                    this.resolved = true;
                     reject(new Error(`Server exited with code ${code}`));
                 } else if (!this.clientRequestedStop) {
                     this.emit("server-exited", code, signal);
@@ -293,7 +254,46 @@ export class GDBServerSession extends EventEmitter {
         });
     }
 
-    public writeToConsole(data: Buffer) {
+    private matchRegex: RegExp | null = null;
+    private stdErrRemaining = "";
+    private handleStderr(data: Buffer, doConsole: boolean) {
+        if (doConsole) {
+            this.writeToConsole(data, true);
+        }
+        this.stdErrRemaining = this.doMatch(data, this.stdErrRemaining);
+    }
+
+    private stdoutRemaining = "";
+    private handleStdout(data: Buffer, doConsole: boolean) {
+        if (doConsole) {
+            this.writeToConsole(data, false);
+        }
+        this.stdoutRemaining = this.doMatch(data, this.stdoutRemaining);
+    }
+
+    private doMatch(data: Buffer, remaining: string) {
+        if (this.matchRegex && !this.resolved) {
+            const str = remaining + data.toString();
+            const lines = str.split(/\r?\n/);
+            remaining = str.endsWith("\n") ? "" : lines[lines.length - 1];
+            for (const l of lines) {
+                const line = l.trim();
+                if (line && this.matchRegex.test(line)) {
+                    this.serverController.serverLaunchCompleted();
+                    this.serverResolve?.();
+                    this.serverResolve = null;
+                    this.resolved = true;
+                    break;
+                }
+            }
+        }
+        return remaining;
+    }
+
+    public writeToConsole(data: Buffer, isStdErr = false) {
+        if (this.session.args.routeGdbServerOutputToDebugConsole) {
+            this.session.handleMsg(isStdErr ? GdbEventNames.Stderr : GdbEventNames.Stdout, data.toString());
+        }
         if (this.consoleSocket && !this.consoleSocket.destroyed) {
             this.consoleSocket.write(data);
         }
@@ -303,9 +303,10 @@ export class GDBServerSession extends EventEmitter {
         this.clientRequestedStop = true;
         if (this.process) {
             // Check if process is still running before killing
-            if (this.process.exitCode === null && this.process.signalCode === null) {
-                this.process.kill();
+            if (this.session.args.debugFlags.anyFlags) {
+                this.session.handleMsg(Stderr, "Stopping gdb-server process...\n");
             }
+            this.process.kill();
             this.process = null;
         } else if (this.proxyClient) {
             try {
@@ -359,7 +360,7 @@ export class GDBServerSession extends EventEmitter {
 
     private getTCPPorts(useParent: boolean): Thenable<void> {
         return new Promise((resolve, reject) => {
-            const startPort = 35000;
+            const startPort = DefaultPortBase.gdbServer;
             if (useParent) {
                 this.ports = this.session.args.pvtPorts = this.session.args.pvtParent.pvtPorts;
                 this.serverController.ports = this.ports;
@@ -381,7 +382,9 @@ export class GDBServerSession extends EventEmitter {
                             (ports: { [key: string]: TcpPortDef }) => {
                                 this.ports = ports;
                                 this.serverController.ports = ports;
-                                this.session.handleMsg(Stderr, `Allocated TCP ports for gdb-server via proxy: ${JSON.stringify(ports)}\n`);
+                                if (this.session.args.debugFlags.anyFlags) {
+                                    this.session.handleMsg(Stderr, `Allocated TCP ports for gdb-server via proxy: ${JSON.stringify(ports)}\n`);
+                                }
                                 resolve();
                             },
                             (e: any) => {
@@ -390,7 +393,9 @@ export class GDBServerSession extends EventEmitter {
                         );
                     } else {
                         this.serverController.ports = this.ports;
-                        this.session.handleMsg(Stderr, `Allocated TCP ports for gdb-server: ${JSON.stringify(this.ports)}\n`);
+                        if (this.session.args.debugFlags.anyFlags) {
+                            this.session.handleMsg(Stderr, `Allocated TCP ports for gdb-server: ${JSON.stringify(this.ports)}\n`);
+                        }
                         resolve();
                     }
                 },
@@ -402,23 +407,25 @@ export class GDBServerSession extends EventEmitter {
     }
 
     //
-    // Following function should never exist. The only way ST tools work is if the are run from the dir. where the
-    // executable lives. Tried setting LD_LIBRARY_PATH, worked for some people and broke other peoples environments.
-    // Normally, we NEED the server's CWD to be same as what the user wanted from the config. Because this where
-    // the server scripts (OpenOCD, JLink, etc.) live and changing cwd for all servers will break for other servers
-    // that are not so quirky.
+    // The server's cwd is the user's configured directory, because that is where the
+    // server's own scripts live (OpenOCD's .cfg, JLink's, ...) and they are referenced
+    // relatively. There is deliberately no per-server override: under the proxy this
+    // directory is the session directory that `syncFiles` populates, so overriding it
+    // would break file sync on remote sessions and not merely path resolution.
     //
-    private getServerCwd(serverExe: string) {
-        let serverCwd = this.session.args.cwd || process.cwd();
-        if (this.session.args.serverCwd) {
-            serverCwd = this.session.args.serverCwd;
-        } else if (this.session.args.servertype === "stlink") {
-            serverCwd = path.dirname(serverExe) || ".";
-            if (serverCwd !== ".") {
-                this.session.handleMsg(Stderr, `Setting GDB-Server CWD: ${serverCwd}\n`);
-            }
-        }
-        return serverCwd;
+    // This used to carry a special case for `servertype === "stlink"`, which forced the
+    // cwd to the executable's directory: ST-LINK_gdbserver could not find
+    // libSTLinkUSBDriver otherwise. That is fixed. Its binaries now resolve the library
+    // through a self-relative rpath (`@executable_path` on macOS, `$ORIGIN` on Linux)
+    // and Windows searches the executable's own directory ahead of the cwd, so all
+    // three platforms load correctly from any working directory -- verified against
+    // STM32CubeCLT 1.17/1.20/1.22 and the standalone bundles. If a report ever comes
+    // back from a much older install, the fix is theirs to ship, not ours to work
+    // around: forcing the cwd here breaks every server whose scripts are relative to
+    // the user's project.
+    //
+    private getServerCwd() {
+        return this.session.args.cwd || process.cwd();
     }
 }
 

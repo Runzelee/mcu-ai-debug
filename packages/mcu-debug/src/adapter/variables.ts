@@ -136,7 +136,7 @@ export class VariableObject extends VariableKeys implements GdbProtocolVariable 
                     this.sizeof = size;
                 }
             }
-        } catch (e) {}
+        } catch (e) { }
         return this.sizeof || null;
     }
 
@@ -158,7 +158,7 @@ export class VariableObject extends VariableKeys implements GdbProtocolVariable 
                     }
                 }
             }
-        } catch (e) {}
+        } catch (e) { }
         return this.editable;
     }
 
@@ -183,7 +183,7 @@ export class VariableObject extends VariableKeys implements GdbProtocolVariable 
                     }
                 }
             }
-        } catch (e) {}
+        } catch (e) { }
         return this.addressOf || null;
     }
 
@@ -308,6 +308,22 @@ export class VariableContainer {
         }
         return false;
     }
+    // Unlike deleteObjectByGdbName, this always issues '-var-delete': the child's parent is NOT
+    // being deleted here (it just changed shape), so GDB will not cascade-remove it on its own.
+    public async deleteStaleChild(gdbVarName: string, delErr?: (str: string) => void): Promise<boolean> {
+        const obj = this.gdbVarNameToObjMap.get(gdbVarName);
+        if (!obj) {
+            return false;
+        }
+        this.variableHandles.release(obj.handle >>> ScopeBits);
+        try {
+            await this.gdbInstance.sendCommand(`-var-delete ${gdbVarName}`);
+        } catch {
+            delErr?.(gdbVarName);
+        }
+        this.gdbVarNameToObjMap.delete(gdbVarName);
+        return true;
+    }
     public hasGdbName(gdbVarName: string): boolean {
         return this.gdbVarNameToObjMap.has(gdbVarName);
     }
@@ -347,7 +363,7 @@ export class VariableContainer {
                     ret.value = `${variable.addressOf} ${match[3]} "${vStr}"`;
                     ret.memoryReference = variable.addressOf;
                 }
-            } catch (e) {}
+            } catch (e) { }
         }
     }
 
@@ -547,7 +563,7 @@ export class VariableManager {
     public async clearForContinue() {
         const err = (str: string) => {
             if (this.debugSession.args.debugFlags.anyFlags) {
-                this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error deleting GDB variable ${str} on stop/continue\n`);
+                this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error deleting GDB variable ${str} on stop/continue\n`);
             }
         };
         for (const container of this.containers.values()) {
@@ -801,7 +817,7 @@ export class VariableManager {
             } else {
                 const [child, handle] = await createVariable(exp, item);
                 if (!child) {
-                    this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Warning: Could not parse child variable ${item["exp"]} of parent ${gdbName}\n`);
+                    this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Warning: Could not parse child variable ${item["exp"]} of parent ${gdbName}\n`);
                     continue;
                 }
                 if (item["numchild"] && parseInt(item["numchild"]) > 0) {
@@ -842,7 +858,7 @@ export class VariableManager {
                     recalcEvalName = false;
                 }
                 child.evaluateName = isArray ? `${parentEvalName}[${child.exp}]` : `${parentEvalName}.${child.exp}`;
-                // this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Created child ${handle} ${child.evaluateName}: ${JSON.stringify(child)}\n`);
+                // this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Created child ${handle} ${child.evaluateName}: ${JSON.stringify(child)}\n`);
                 ret.push(child);
             }
         }
@@ -874,8 +890,10 @@ export class VariableManager {
                 return this.getRegistersForGroup(parent);
             }
             const [threadId, frameId, _] = parent.getThreadFrameInfo();
+            const oldChildren = parent.children;
             const children = await this.varListChildren(container, parent, parent.gdbVarName ?? "", threadId, frameId);
             parent.children = children;
+            await this.deleteStaleChildren(container, oldChildren, children);
             const protoVars: GdbProtocolVariable[] = [];
             for (const child of children) {
                 await this.setVarProps(container.gdbInstance, child, isClientVSCode);
@@ -884,9 +902,29 @@ export class VariableManager {
             return protoVars;
         } catch (e) {
             if (this.debugSession.args.debugFlags.anyFlags) {
-                this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error getting children for variable ${parent.evaluateName}: ${e}\n`);
+                this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error getting children for variable ${parent.evaluateName}: ${e}\n`);
             }
             return Promise.reject(e);
+        }
+    }
+
+    // If a parent's shape changed (array/union/pointee grew, shrank, or switched arms), some
+    // previously-listed children no longer exist. The parent itself isn't being deleted, so GDB
+    // won't cascade-remove them - left alone they leak in GDB's varobj table for as long as the
+    // parent lives, which for live-watch clients can be the whole debug session.
+    private async deleteStaleChildren(container: VariableContainer, oldChildren: VariableObject[] | undefined, newChildren: VariableObject[]): Promise<void> {
+        if (!oldChildren || oldChildren.length === 0) {
+            return;
+        }
+        const newNames = new Set(newChildren.map((c) => c.gdbVarName).filter((n) => !!n));
+        for (const old of oldChildren) {
+            if (old.gdbVarName && !newNames.has(old.gdbVarName)) {
+                await container.deleteStaleChild(old.gdbVarName, (name) => {
+                    if (this.debugSession.args.debugFlags.anyFlags) {
+                        this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Warning: Could not delete stale child GDB variable '${name}'\n`);
+                    }
+                });
+            }
         }
     }
 
@@ -967,7 +1005,7 @@ export class VariableManager {
                         }
                     } catch (e) {
                         if (this.debugSession.args.debugFlags.anyFlags) {
-                            this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error getting register variable ${regName}: ${e}\n`);
+                            this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error getting register variable ${regName}: ${e}\n`);
                         }
                     }
                 }
@@ -975,7 +1013,7 @@ export class VariableManager {
             return variables;
         } catch (e) {
             if (this.debugSession.args.debugFlags.anyFlags) {
-                this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error getting registers for group ${groupName}: ${e}\n`);
+                this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error getting registers for group ${groupName}: ${e}\n`);
             }
             return [];
         }
@@ -1037,7 +1075,7 @@ export class VariableManager {
                         }
                     } catch (e) {
                         if (this.debugSession.args.debugFlags.anyFlags) {
-                            this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error getting local variable ${v["name"]}: ${e}\n`);
+                            this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error getting local variable ${v["name"]}: ${e}\n`);
                         }
                     }
                 }
@@ -1067,7 +1105,7 @@ export class VariableManager {
             })
             .catch((e) => {
                 if (this.debugSession.args.debugFlags.anyFlags) {
-                    this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error getting register names: ${e}\n`);
+                    this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error getting register names: ${e}\n`);
                 }
             });
     }
@@ -1100,7 +1138,7 @@ export class VariableManager {
             }
         } catch (e) {
             if (this.debugSession.args.debugFlags.anyFlags) {
-                this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error getting register groups: ${e}\n`);
+                this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error getting register groups: ${e}\n`);
             }
         } finally {
             if (this.registerGroups.length === 0) {
@@ -1166,7 +1204,7 @@ export class VariableManager {
             this.registerGroups = this.registerGroups.filter((g) => g.registers.length > 0);
         } catch (e) {
             if (this.debugSession.args.debugFlags.anyFlags) {
-                this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error getting register group mappings: ${e}\n`);
+                this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error getting register group mappings: ${e}\n`);
             }
         } finally {
             container.gdbInstance.suppressConsoleOutput = false;
@@ -1268,7 +1306,7 @@ export class VariableManager {
                     await withTimeout(1000, this.debugSession.debugHelper.symbolTableReady);
                 } catch {
                     if (this.debugSession.args.debugFlags.anyFlags) {
-                        this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Warning: Timeout waiting for symbol table to be ready for global variables\n`);
+                        this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Warning: Timeout waiting for symbol table to be ready for global variables\n`);
                     }
                     return [];
                 }
@@ -1321,14 +1359,14 @@ export class VariableManager {
                     }
                 } catch (e) {
                     if (this.debugSession.args.debugFlags.anyFlags) {
-                        this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error getting global variable ${v}: ${e}\n`);
+                        this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error getting global variable ${v}: ${e}\n`);
                     }
                 }
             }
             return variables;
         } catch (e) {
             if (this.debugSession.args.debugFlags.anyFlags) {
-                this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error getting global variables: ${e}\n`);
+                this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error getting global variables: ${e}\n`);
             }
         }
         return [];
@@ -1347,7 +1385,7 @@ export class VariableManager {
                     await withTimeout(2000, this.debugSession.debugHelper.symbolTableReady);
                 } catch {
                     if (this.debugSession.args.debugFlags.anyFlags) {
-                        this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Warning: Timeout waiting for symbol table to be ready for global variables\n`);
+                        this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Warning: Timeout waiting for symbol table to be ready for global variables\n`);
                     }
                     return [];
                 }
@@ -1404,14 +1442,14 @@ export class VariableManager {
                     }
                 } catch (e) {
                     if (this.debugSession.args.debugFlags.anyFlags) {
-                        this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error getting global variable ${v}: ${e}\n`);
+                        this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error getting global variable ${v}: ${e}\n`);
                     }
                 }
             }
             return variables;
         } catch (e) {
             if (this.debugSession.args.debugFlags.anyFlags) {
-                this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Error getting global variables: ${e}\n`);
+                this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Error getting global variables: ${e}\n`);
             }
         }
         return [];
@@ -1455,7 +1493,7 @@ export class VariableManager {
         }
         const allowedFormats = "xotbdrN";
         if (format.length !== 1 || allowedFormats.indexOf(format) === -1) {
-            this.debugSession.handleMsg(GdbEventNames.Console, `mcu-debug: Invalid register format specified: ${format}. Allowed formats are: ${allowedFormats.split("").join(", ")}\n`);
+            this.debugSession.handleMsg(GdbEventNames.Stderr, `mcu-debug: Invalid register format specified: ${format}. Allowed formats are: ${allowedFormats.split("").join(", ")}\n`);
             return;
         }
         if (format === "b") {
@@ -1798,7 +1836,7 @@ async function queryGdbVarInfo(gdbInstance: GdbInstance, varObj: VariableObject)
                 }
             }
         }
-    } catch (e) {}
+    } catch (e) { }
     try {
         const cmd = `-data-evaluate-expression "sizeof(${varObj.evaluateName})"`;
         const miOutput = await gdbInstance.sendCommand(cmd, 100);
@@ -1806,7 +1844,7 @@ async function queryGdbVarInfo(gdbInstance: GdbInstance, varObj: VariableObject)
         if (record && record["value"]) {
             obj.size = parseInt(record["value"]);
         }
-    } catch (e) {}
+    } catch (e) { }
     try {
         const cmd = `-data-evaluate-expression "&(${varObj.evaluateName})"`;
         const miOutput = await gdbInstance.sendCommand(cmd, 100);
@@ -1814,7 +1852,7 @@ async function queryGdbVarInfo(gdbInstance: GdbInstance, varObj: VariableObject)
         if (record && record["value"]) {
             obj.memoryReference = record["value"];
         }
-    } catch (e) {}
+    } catch (e) { }
     return obj;
 }
 
@@ -1979,7 +2017,7 @@ export class GdbOutputMsgContainer {
     private readonly splitBits = 20;
     private readonly splitMask = (1 << this.splitBits) - 1;
 
-    constructor() {}
+    constructor() { }
 
     encodeRef(ix: number): number {
         const lower = ix & this.splitMask;

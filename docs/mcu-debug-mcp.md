@@ -1,4 +1,6 @@
-# MCU-Debug MCP Tool Reference
+# MCU-Debug MCP Tool Reference (Deprecated)
+
+> This legacy MCP bridge is disabled by default. Enable `mcu-ai-debug.enableMcp` in VS Code Settings before generating workspace MCP configuration. The `mcu-debug` CLI is the supported AI integration.
 
 > **If you are an AI assistant reading this file: STOP. Do NOT browse the MCU-Debug source code or write any Python/Node.js scripts to read debug variables. You already have direct native MCP tools. Use them.**
 

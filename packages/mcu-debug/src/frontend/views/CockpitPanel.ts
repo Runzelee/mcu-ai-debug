@@ -1,0 +1,262 @@
+// Copyright (c) 2026 MCU-Debug Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+import * as vscode from "vscode";
+import { generateNonce, type FromUi } from "@mcu-debug/shared";
+import { ManagedTab, type CockpitPanelSink } from "./ManagedTab";
+
+/**
+ * WebviewViewProvider for the MCU DEBUG bottom panel.
+ *
+ * Hosts the Svelte cockpit webview (resources/cockpit/) and manages the
+ * collection of ManagedTab instances. Each ManagedTab owns its data source
+ * (socket, RTT channel, etc.) and calls back into this panel to post messages.
+ *
+ * VS Code owns the singleton lifecycle. resolveWebviewView may be called more
+ * than once (e.g. after a full panel collapse). On each call we replay all
+ * existing tabs so the webview rebuilds its state correctly.
+ */
+export class CockpitPanel implements vscode.WebviewViewProvider, CockpitPanelSink {
+    public static instance: CockpitPanel | undefined;
+    public static readonly viewId = "mcu-debug.cockpit";
+
+    private _view: vscode.WebviewView | undefined;
+    private _webviewReady = false;
+    private _activeTabId: string | null = null;
+    private readonly _tabs = new Map<string, ManagedTab>();
+
+    constructor(private readonly _extensionUri: vscode.Uri) {
+        CockpitPanel.instance = this;
+    }
+
+    // -------------------------------------------------------------------------
+    // vscode.WebviewViewProvider
+    // -------------------------------------------------------------------------
+
+    resolveWebviewView(
+        webviewView: vscode.WebviewView,
+        _context: vscode.WebviewViewResolveContext,
+        _token: vscode.CancellationToken,
+    ): void {
+        this._view = webviewView;
+        this._webviewReady = false;
+
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [
+                vscode.Uri.joinPath(this._extensionUri, "resources", "cockpit"),
+                vscode.Uri.joinPath(this._extensionUri, "resources", "codicons"),
+                vscode.Uri.joinPath(this._extensionUri, "images"),
+            ],
+        };
+
+        webviewView.webview.html = this._buildHtml(webviewView.webview);
+
+        webviewView.webview.onDidReceiveMessage((msg: FromUi) => this._handleFromUi(msg));
+
+        // When the view is hidden (user switches panel tabs), VS Code destroys the webview.
+        // Mark all terminals as unavailable immediately so send() queues data instead of
+        // posting to a dead webview. Data is replayed when the webview's terminals remount.
+        webviewView.onDidChangeVisibility(() => {
+            for (const tab of this._tabs.values()) {
+                tab._onTerminalMountStateChanged(webviewView.visible);
+            }
+        });
+        webviewView.onDidDispose(() => {
+            this._view = undefined;
+            this._webviewReady = false;
+            for (const tab of this._tabs.values()) {
+                tab._onTerminalMountStateChanged(false);
+            }
+        });
+
+        // Tabs are replayed when the webview sends { type: 'ready' } — see _handleFromUi.
+    }
+
+    show(preserveFocus = true): void {
+        this._view?.show(preserveFocus);
+    }
+
+    activateTab(tabId: string, preserveFocus = true): void {
+        if (!this._tabs.has(tabId)) {
+            return;
+        }
+
+        this._activeTabId = tabId;
+        this.show(preserveFocus);
+
+        if (this._webviewReady) {
+            this.postToWebview({ type: "tab-activate", tabId });
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // CockpitPanelSink — called by ManagedTab instances
+    // -------------------------------------------------------------------------
+
+    postToWebview(msg: object): void {
+        this._view?.webview.postMessage(msg);
+    }
+
+    isParentPanelVisible(): boolean {
+        return this._view?.visible ?? false;
+    }
+
+    isTabActive(tabId: string): boolean {
+        return this._activeTabId === tabId;
+    }
+
+    // -------------------------------------------------------------------------
+    // Public API — used by the rest of the extension
+    // -------------------------------------------------------------------------
+
+    /**
+     * Register a new tab and tell the webview to display it.
+     * Idempotent: calling again with the same tabId is a no-op.
+     */
+    addTab(tab: ManagedTab): void {
+        if (this._tabs.has(tab.tabId)) {
+            return;
+        }
+        this._tabs.set(tab.tabId, tab);
+        tab._attach(this);
+        this._activeTabId = tab.tabId;
+        if (this._webviewReady) {
+            this.postToWebview({ type: "tab-add", tab: tab.descriptor });
+        }
+        // else: tab is in _tabs and will be sent when the webview fires 'ready'
+    }
+
+    /**
+     * Remove a tab from the internal registry without telling the webview.
+     * Used when the extension tears down a tab that the user already closed
+     * (the webview already removed it from its own state via tab-close).
+     */
+    removeTab(tabId: string): void {
+        this._tabs.delete(tabId);
+        if (this._activeTabId === tabId) {
+            this._activeTabId = null;
+        }
+    }
+
+    /**
+     * Empty a tab's terminal and its replay buffer. Defaults to the active tab, which
+     * is what a command invoked outside the webview (palette, keybinding) means.
+     */
+    clearTab(tabId?: string): void {
+        const id = tabId ?? this._activeTabId;
+        if (!id) {
+            return;
+        }
+        this._tabs.get(id)?.clear();
+    }
+
+    findTabByLabel(label: string): ManagedTab | undefined {
+        for (const tab of this._tabs.values()) {
+            if (tab.label === label) {
+                return tab;
+            }
+        }
+        return undefined;
+    }
+
+    get tabCount(): number {
+        return this._tabs.size;
+    }
+
+    // -------------------------------------------------------------------------
+    // Private
+    // -------------------------------------------------------------------------
+
+    private _handleFromUi(msg: FromUi): void {
+        if (msg.type === "ready") {
+            this._webviewReady = true;
+            for (const tab of this._tabs.values()) {
+                tab._resetTerminalReady();
+                this._view?.webview.postMessage({ type: "tab-add", tab: tab.descriptor });
+                tab.onWebviewReady();
+            }
+            if (this._activeTabId && this._tabs.has(this._activeTabId)) {
+                this._view?.webview.postMessage({ type: "tab-activate", tabId: this._activeTabId });
+            }
+            return;
+        }
+        if (msg.type === "active-tab-changed") {
+            this._activeTabId = msg.tabId;
+            return;
+        }
+        if (msg.type === "terminal-ready") {
+            this._tabs.get(msg.tabId)?._onTerminalReady();
+            return;
+        }
+        const tab = this._tabs.get(msg.tabId);
+        if (!tab) {
+            return;
+        }
+        switch (msg.type) {
+            case "user-input":
+                tab.onUserInput(msg.text);
+                break;
+            case "special-key":
+                tab.onSpecialKey(msg.key);
+                break;
+            case "cockpit-toolbar-action":
+                tab.onCockpitToolbarAction(msg.action);
+                break;
+            case "cockpit-config-select":
+                tab.onCockpitConfigSelect(msg.configName);
+                break;
+            case "tab-close":
+                tab.onUserClose();
+                this._tabs.delete(msg.tabId);
+                break;
+        }
+    }
+
+    private _buildHtml(webview: vscode.Webview): string {
+        const scriptUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, "resources", "cockpit", "cockpit.js"),
+        );
+        const styleUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, "resources", "cockpit", "cockpit.css"),
+        );
+        const codiconsUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, "resources", "codicons", "codicon.css"),
+        );
+        const resetIconUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, "images", "reset.svg"),
+        );
+        const nonce = generateNonce();
+
+        return /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none';
+                 font-src ${webview.cspSource};
+                 img-src ${webview.cspSource};
+                 script-src 'nonce-${nonce}';
+                 style-src ${webview.cspSource} 'unsafe-inline';">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="${styleUri}">
+    <link rel="stylesheet" href="${codiconsUri}">
+</head>
+<body data-reset-icon="${resetIconUri}">
+    <div id="app"></div>
+    <script type="module" nonce="${nonce}" src="${scriptUri}"></script>
+</body>
+</html>`;
+    }
+}

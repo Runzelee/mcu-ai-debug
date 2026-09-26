@@ -5,11 +5,11 @@ import { LiveWatchMonitor } from "./live-watch-monitor";
 import { MemoryRequests } from "./memory";
 import { TargetInfo } from "./target-info";
 import { GdbEventNames, Stderr, Stdout } from "./gdb-mi/mi-types";
-import { parseAddress } from "../frontend/utils";
+import { parseAddress } from "../common/utils";
 import { RTTConfiguration, RTTServerHelper } from "./servers/common";
 import { EventEmitter } from "events";
 import { DebugProtocol } from "@vscode/debugprotocol";
-import { Decoder, DecoderSpec } from "@mcu-debug/shared";
+import { Decoder, DecoderSpec, TcpPortScanner } from "@mcu-debug/shared";
 
 /**
  * RTT Up/Down-Buffer Descriptor Offsets (32-bit)
@@ -95,6 +95,7 @@ export class RttBufferManager extends EventEmitter {
 
         this.mainSession.gdbInstance.on(GdbEventNames.Stopped, this.onStopped.bind(this));
         this.mainSession.gdbInstance.on(GdbEventNames.Running, this.onRunning.bind(this));
+        this.mainSession.gdbInstance.on(GdbEventNames.Exited, this.onExited.bind(this));
         this.throughputMonitor = new ThroughputMonitor(this.mainSession);
     }
 
@@ -381,16 +382,46 @@ export class RttBufferManager extends EventEmitter {
         }
     }
 
+    // Maybe we should never stop/start the poll, but just have the onStopped/onRunning logic gate the actual
+    // reading/writing of data. We are trying not do work while stopped and also debounce the stopped event because
+    // sometimes DA/gdb can send multiple stop events in a row. Fast start/stops also happen when setting breakpoints while running
     onRunning() {
         this.sessionStatus = "running";
+        if (this.onStoppedTimer) {
+            clearTimeout(this.onStoppedTimer);
+            this.onStoppedTimer = null;
+        }
         if (this.initialized) {
             this.startPoll();
             this.throughputMonitor = new ThroughputMonitor(this.mainSession);
         }
     }
 
+    private onStoppedTimer: NodeJS.Timeout | null = null;
     onStopped() {
-        this.sessionStatus = "stopped";
+        if (this.onStoppedTimer) {
+            clearTimeout(this.onStoppedTimer);
+            this.onStoppedTimer = null;
+        }
+        this.onStoppedTimer = setTimeout(() => {
+            if (this.onStoppedTimer) {
+                clearTimeout(this.onStoppedTimer);
+                this.onStoppedTimer = null;
+                this.sessionStatus = "stopped";
+            }
+        }, 1000);
+    }
+
+    onExited() {
+        this.sessionStatus = "none";
+        if (this.onStoppedTimer) {
+            clearTimeout(this.onStoppedTimer);
+            this.onStoppedTimer = null;
+        }
+        this.disableRtt = true;
+        if (this.transport) {
+            this.transport.dispose();
+        }
     }
 
     async doSearch(): Promise<void> {
@@ -459,12 +490,18 @@ export class RttTcpServer extends EventEmitter implements RttTransport {
             }
             this.ports.set(channel, portNum);
         }
-        helper.emitConfigures(this.config, this);
         const host = this.config?.useBuiltinRTT?.hostName || "127.0.0.1";
-        await this.start(host);
+        // Unlike the gdb-server RTT ports, these are bound by us. A reservation is a live listening
+        // socket, so it has to be handed back before start() can bind. Everything else was already
+        // released at 'ports-done', and no allocation happens after this point.
+        await TcpPortScanner.releaseHeldPorts();
+        await this.start(host, helper);
+        setTimeout(() => {
+            helper.emitConfigures(this.config!, this);
+        }, 20);
     }
 
-    async start(host: string) {
+    async start(host: string, helper: RTTServerHelper) {
         for (const [channel, port] of this.ports) {
             const preDecoder = this.config?.pre_decoder;
             const usePredecoder = (preDecoder && !preDecoder?.channels?.length) || (preDecoder?.channels && preDecoder.channels.indexOf(channel) >= 0);
@@ -488,6 +525,7 @@ export class RttTcpServer extends EventEmitter implements RttTransport {
             }
             this.server = net.createServer((socket) => {
                 // 1. Add new client
+                socket.setNoDelay(true); // short RTT lines then silence -- exactly what Nagle delays
                 this.rttChannelToSocket.get(channel)?.add(socket);
                 this.mainSession.handleMsg(Stdout, `Client connected to RTT channel: ${channel}. Total clients: ${this.rttChannelToSocket.get(channel)?.size}`);
                 this.emit("clientConnected", socket);
@@ -563,6 +601,7 @@ export class RttTcpServer extends EventEmitter implements RttTransport {
             }
             this.server.close();
             this.removeAllListeners();
+            this.server = null;
         }
     }
 }
@@ -573,7 +612,7 @@ export class ThroughputMonitor {
     private startTime = Date.now();
     private lastReportTime = Date.now();
 
-    constructor(private mainSession: GDBDebugSession) {}
+    constructor(private mainSession: GDBDebugSession) { }
 
     /** Call this inside your RTT poll logic when data arrives */
     public record(buffer: Buffer, msgCount: number = 1) {

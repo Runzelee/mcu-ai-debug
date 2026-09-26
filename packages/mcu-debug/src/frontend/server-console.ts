@@ -1,0 +1,268 @@
+import * as net from "net";
+import * as vscode from "vscode";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+import { createTerminalUniqueName, getUUidPrefixed, ManagedTabConsole } from "./views/ManagedTab";
+import { AnsiHelpers } from "../common/ansi-helpers";
+import { getAnyFreePort } from "../adapter/servers/common";
+import { DefaultPortBase } from "@mcu-debug/shared";
+
+//      vscode.commands.executeCommand('workbench.action.terminal.renameWithArg', { name: 'myName' });
+
+let consoleLogFd = -1;
+export class GDBServerConsoleInstance {
+    protected static allConsoles: GDBServerConsoleInstance[] = [];
+    public terminal: ManagedTabConsole | null = null;
+    protected toBackend: net.Socket | null = null;
+
+    constructor() {
+    }
+
+    public static disposeAll() {
+        const saved = GDBServerConsoleInstance.allConsoles;
+        GDBServerConsoleInstance.allConsoles = [];
+        for (const c of saved) {
+            if (c.toBackend) {
+                c.toBackend.destroy();
+                c.toBackend = null;
+            }
+        }
+    }
+
+    public newBackendConnection(socket: net.Socket) {
+        this.createAndShowTerminal();
+        this.toBackend = socket;
+        if (!this.terminal) {
+            throw new Error("PTY terminal not created");
+        }
+        this.terminal?.enableInput();
+        this.terminal?.setState({ kind: "active" });
+        this.clearTerminal();
+        this.debugMsg('onBackendConnect: gdb-server session connected. You can switch to "DEBUG CONSOLE" to see GDB interactions.');
+        socket.setKeepAlive(true);
+        socket.on("close", () => {
+            this.debugMsg("onBackendConnect: gdb-server session closed");
+            this.terminal?.send(AnsiHelpers.magentaFormat("GDB server session ended. This terminal will be reused, waiting for next session to start..."));
+            this.toBackend = null;
+            this.freeTerminal();
+        });
+        socket.on("data", (data) => {
+            this.terminal?.send(data.toString());
+            this.logData(data);
+        });
+        socket.on("error", (e) => {
+            this.debugMsg(`GDBServerConsole: onBackendConnect: gdb-server program client error ${e}`);
+            this.toBackend = null;
+            this.freeTerminal();
+        });
+    }
+
+    private freeTerminal() {
+        if (this.terminal) {
+            this.terminal.disableInput();
+            this.terminal.setState({ kind: "inactive" });
+            this.terminal.removeAllListeners();
+            this.terminal = null;
+        }
+    }
+
+    public isClosed() {
+        return this.toBackend === null;
+    }
+
+    protected createAndShowTerminal() {
+        if (!this.terminal) {
+            this.setupTerminal();
+        }
+    }
+
+    public clearTerminal() {
+        this.terminal?.clear();
+    }
+
+    private setupTerminal() {
+        const baseName = "gdb-server";
+        const uuid = getUUidPrefixed(baseName);
+        const [name, terminal, isNew] = createTerminalUniqueName(baseName, (nm: string) => {
+            const ret = new ManagedTabConsole(uuid, nm, "console", "both", "Enter input for gdb-server");
+            return ret;
+        });
+        this.terminal = terminal;
+        this.terminal?.setState({ kind: "inactive" });
+        this.terminal?.clear();
+        this.terminal?.setLabel(name);
+        this.terminal.addCloseHandler(() => {
+            this.onTerminalClosed();
+        });
+        this.terminal.on("data", (data) => {
+            this.sendToBackend(data);
+        });
+        if (this.toBackend === null) {
+            this.terminal?.send(AnsiHelpers.blueFormat("Waiting for gdb server to start...\n"));
+            this.terminal.disableInput();
+        } else {
+            this.terminal?.send(AnsiHelpers.greenFormat("Resuming connection to gdb server...\n"));
+            this.terminal.enableInput();
+        }
+    }
+
+    private onTerminalClosed() {
+        this.terminal = null;
+        if (this.toBackend) {
+            // Let the terminal close completely and try to re-launch
+            setTimeout(() => {
+                vscode.window.showInformationMessage("gdb-server terminal closed unexpectedly. Trying to reopen it");
+                this.setupTerminal();
+            }, 100);
+        }
+    }
+
+    public sendToBackend(data: string | Buffer) {
+        if (this.toBackend) {
+            this.toBackend.write(data.toString());
+            this.toBackend.uncork();
+        }
+    }
+
+    public logData(data: Buffer | string) {
+        GDBServerConsole.logDataStatic(data);
+    }
+
+    public debugMsg(msg: string) {
+        GDBServerConsole.debugMsgStatic(this.terminal, msg);
+    }
+}
+export class GDBServerConsole {
+    protected toBackendServer: net.Server | null = null;
+    protected toBackend: net.Socket | null = null;
+    protected toBackendPort: number = -1;
+    protected logFName = "";
+    protected allConsoles: GDBServerConsoleInstance[] = [];
+    private static BackendPort: number = -1;
+    private static thisInstance: GDBServerConsole | null = null;
+
+    constructor(
+        public context: vscode.ExtensionContext,
+        public logFileName = "",
+    ) {
+        this.createLogFile(logFileName);
+        GDBServerConsole.thisInstance = this;
+    }
+
+    public createLogFile(logFileName: string) {
+        this.logFName = logFileName;
+        const showErr = !!this.logFName;
+
+        if (consoleLogFd >= 0) {
+            try {
+                fs.closeSync(consoleLogFd);
+            } finally {
+                consoleLogFd = -1;
+            }
+        }
+
+        try {
+            if (this.logFName) {
+                const dir = path.dirname(this.logFName);
+                if (dir) {
+                    fs.mkdirSync(dir, { recursive: true });
+                }
+                this.logFName = this.logFName.replace("${PID}", process.pid.toString());
+            } else {
+                const tmpdir = os.tmpdir();
+                this.logFName = `${tmpdir}/gdb-server-console-${process.pid}.log`;
+            }
+            consoleLogFd = fs.openSync(this.logFName, "w");
+        } catch (error) {
+            if (showErr) {
+                vscode.window.showErrorMessage(`Could not open log file: ${this.logFName}\n${error}`);
+            }
+        }
+    }
+
+    public isServerAlive() {
+        return this.toBackendServer !== null;
+    }
+
+    public static debugMsgStatic(console: ManagedTabConsole | null, msg: string) {
+        const date = new Date();
+        msg = `[${date.toISOString()}] SERVER CONSOLE DEBUG: ` + msg;
+        // console.log(msg);
+        if (console) {
+            msg += msg.endsWith("\n") ? "" : "\n";
+            console.send(AnsiHelpers.magentaFormat(msg));
+        }
+        GDBServerConsole.logDataStatic(msg);
+    }
+
+    // Create a server for the GDBServer running in the adapter process. Any data
+    // from the gdb-server (like OpenOCD) is sent here and sent to the terminal
+    // and any usr input in the terminal is sent back (like semi-hosting)
+    private startServerPromise: Promise<void> | null = null;
+    public startServer(): Promise<void> {
+        if (this.startServerPromise) {
+            return this.startServerPromise;
+        }
+        const started = new Promise<void>(async (resolve, reject) => {
+            try {
+                const p = await getAnyFreePort(DefaultPortBase.gdbServerConsole);
+                this.toBackendPort = p;
+                const newServer = net.createServer(this.onBackendConnect.bind(this));
+                newServer.listen(this.toBackendPort, "127.0.0.1", () => {
+                    this.toBackendServer = newServer;
+                    GDBServerConsole.BackendPort = this.toBackendPort;
+                    resolve();
+                });
+                newServer.on("error", (e) => {
+                    console.error(e);
+                    reject(e);
+                });
+                newServer.on("close", () => {
+                    this.toBackendServer = null;
+                });
+            } catch (e) {
+                reject(e);
+            }
+        });
+        this.startServerPromise = started;
+        // Do not cache a failure. Now that this runs on the first debug session rather than at
+        // startup, a memoized rejection would leave the console dead for the life of the window
+        // with no way back but a reload -- so drop it and let the next session try again.
+        started.catch(() => {
+            if (this.startServerPromise === started) {
+                this.startServerPromise = null;
+            }
+        });
+        return started;
+    }
+
+    public static async getBackendPort(): Promise<number> {
+        if (GDBServerConsole.thisInstance) {
+            await GDBServerConsole.thisInstance.startServer();
+            return GDBServerConsole.thisInstance.toBackendPort;
+        }
+        throw new Error("GDBServerConsole instance not initialized");
+    }
+
+    // The gdb-server running in the backend (debug adapter)
+    protected onBackendConnect(socket: net.Socket) {
+        const inst = new GDBServerConsoleInstance();
+        inst.newBackendConnection(socket);
+    }
+
+    public static logDataStatic(data: Buffer | string) {
+        try {
+            if (consoleLogFd >= 0) {
+                fs.writeFileSync(consoleLogFd, data.toString());
+                fs.fdatasyncSync(consoleLogFd);
+            }
+        } catch (e) {
+            consoleLogFd = -1;
+        }
+    }
+
+    public dispose() {
+        GDBServerConsoleInstance.disposeAll();
+    }
+}

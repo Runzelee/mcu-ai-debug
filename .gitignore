@@ -32,15 +32,74 @@ mcu-debug-helper
 packages/*/out/
 packages/*/dist/
 packages/*/target/
+packages/*/target-cross/
 packages/*/node_modules/
 packages/shared/lib/
+packages/mcu-debug/bin/
+packages/mcu-debug-proxy/bin/
 
-# Rust build artifacts
-packages/mcu-debug-helper/target/
-packages/mcu-debug-helper/bindings/
+# ts_rs default bindings output (real exports go to packages/shared/)
+packages/mdbg/bindings/
 
 # Do not commit generated file with commit hash
 packages/mcu-debug/src/commit-hash.ts
+
+# Go vendor directory (if using vendor instead of modules)
+vendor/
+
+# Go workspace file (if using go workspaces)
+go.work
+go.work.sum
+
+# Go build cache
+.cache/
+
+# Go module download cache (don't commit, but local to GOPATH)
+# Usually not in project, but just in case
+go/
+
+# Delve debugger
+__debug_bin
+
+# GoLand / IntelliJ IDEA
+*.iml
+.idea/
+
+
+# Air (live reload for Go)
+tmp/
+.air.toml
+
+# Wire (dependency injection)
+wire_gen.go
+
+# gomock
+mock_*.go
+*_mock.go
+# But don't ignore if you commit your mocks
+# Just be specific about paths if needed
+
+# Protocol Buffers / gRPC generated files
+*.pb.go
+*.pb.gw.go
+*_grpc.pb.go
+
+# tygo generated TypeScript files
+# Uncomment if you don't want to commit generated types
+# packages/shared/src/types.ts
+# packages/shared/src/protocol.ts
+
+# CGO
+*.cgo1.go
+*.cgo2.c
+_cgo_defun.c
+_cgo_gotypes.go
+_cgo_export.*
+_testmain.go
+
+# Environment variables
+.env
+.env*.local
 
 # OS
 .DS_Store
@@ -92,6 +151,10 @@ $RECYCLE.BIN/
 # Resources copied by scripts
 packages/mcu-debug/resources/codicons/
 
-# AI Coding Configurations
-.codex
-.claude/
+# Cockpit webview build output (derived from src/webviews/cockpit/ via Vite)
+packages/mcu-debug/resources/cockpit/
+packages/mcu-debug-npm/mcu-debug*.tgz
+
+# Claude Code local permission overrides (personal, not for version control)
+.claude/settings.local.json
+dummy-notes.md

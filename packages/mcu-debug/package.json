@@ -1,9 +1,9 @@
 {
   "name": "mcu-ai-debug",
   "publisher": "Runzelee",
-  "version": "0.1.4",
+  "version": "0.1.18",
   "preview": false,
-  "description": "High-performance MCU debugger with AI/MCP integration, real-time graphing, and local recording.",
+  "description": "MCU debugger with CLI AI cockpit, Live Watch graphing and recording; legacy MCP available as an opt-in.",
   "displayName": "MCU-AI-Debug",
   "keywords": [
     "MCU",
@@ -38,16 +38,16 @@
   ],
   "icon": "images/mcu-ai-debug-128x128.png",
   "activationEvents": [
-    "onDebugResolve:cortex-debug",
     "onDebugResolve:mcu-debug",
-    "onStartupFinished"
+    "onStartupFinished",
+    "onUri"
   ],
   "categories": [
     "Debuggers",
     "Visualization"
   ],
   "engines": {
-    "vscode": "^1.80.0"
+    "vscode": "^1.107.0"
   },
   "type": "commonjs",
   "main": "./dist/extension.js",
@@ -370,47 +370,84 @@
         }
       },
       {
-        "title": "MCU Debug: MCP AI Integration",
+        "title": "MCU Debug: MCP AI Integration (Deprecated)",
         "properties": {
+          "mcu-ai-debug.enableMcp": {
+            "type": "boolean",
+            "default": false,
+            "description": "(Deprecated) Enable the legacy Live Watch MCP server and workspace port file. Disabled by default; use the mcu-debug CLI for AI-assisted debugging.",
+            "deprecationMessage": "Deprecated: use the mcu-debug CLI for AI-assisted debugging. This setting remains available for legacy MCP clients."
+          },
           "mcu-ai-debug.mcpRequireManualRecording": {
             "type": "boolean",
             "default": false,
-            "description": "If enabled, AI Agent recording requests require manual user confirmation (Start/Stop) instead of running for a fixed duration. Useful for synchronizing data capture with physical hardware operations."
+            "description": "(Deprecated) Require manual Start/Stop for legacy MCP recording requests."
           },
           "mcu-ai-debug.mcpRecordingMaxDuration": {
             "type": "number",
             "default": 30,
-            "description": "Maximum allowed recording duration (in seconds) for AI agents in automatic mode."
+            "description": "(Deprecated) Maximum automatic legacy MCP recording duration in seconds."
           },
           "mcu-ai-debug.mcpManualRecordingMaxDuration": {
             "type": "number",
             "default": 60,
-            "description": "Maximum allowed recording duration (in seconds) for AI agents in manual mode. Should be >= mcpRecordingMaxDuration to account for human reaction time."
+            "description": "(Deprecated) Maximum manual legacy MCP recording duration in seconds."
           },
           "mcu-ai-debug.mcpPreferredPort": {
             "type": "number",
             "default": 51234,
             "minimum": 1,
             "maximum": 65535,
-            "description": "Preferred localhost port for the MCU-Debug MCP server. If unavailable, the extension searches the following port range."
+            "description": "(Deprecated) Preferred localhost port for the legacy MCP server."
           },
           "mcu-ai-debug.mcpPortSearchRange": {
             "type": "number",
             "default": 100,
             "minimum": 1,
             "maximum": 1000,
-            "description": "Number of consecutive ports to try for the MCU-Debug MCP server, starting at mcpPreferredPort."
+            "description": "(Deprecated) Number of ports to try for the legacy MCP server."
           }
         }
       }
     ],
     "commands": [
       {
+        "command": "mcu-debug.depositProvision",
+        "title": "Deposit provisioning results to file"
+      },
+      {
+        "command": "mcu-debug.cockpit.addUart",
+        "title": "Add UART",
+        "icon": "$(add)"
+      },
+      {
+        "category": "MCU-Debug",
+        "command": "mcu-debug.cockpit.clear",
+        "title": "Clear Terminal",
+        "icon": "$(clear-all)"
+      },
+      {
         "command": "mcu-debug.resetDevice",
         "title": "Reset device",
         "icon": {
           "dark": "images/reset-dark.svg",
           "light": "images/reset-light.svg"
+        }
+      },
+      {
+        "command": "mcu-debug.pauseAll",
+        "title": "Pause All Debug Sessions",
+        "icon": {
+          "dark": "images/pause-all-dark.svg",
+          "light": "images/pause-all-light.svg"
+        }
+      },
+      {
+        "command": "mcu-debug.resumeAll",
+        "title": "Resume All Debug Sessions",
+        "icon": {
+          "dark": "images/resume-all-dark.svg",
+          "light": "images/resume-all-light.svg"
         }
       },
       {
@@ -435,6 +472,10 @@
         "icon": "$(close)"
       },
       {
+        "command": "mcu-debug.listAvailableSerialPorts",
+        "title": "List Available Serial Ports"
+      },
+      {
         "command": "mcu-debug.liveWatch.editExpr",
         "title": "Edit expression",
         "icon": "$(edit)"
@@ -453,6 +494,11 @@
         "command": "mcu-debug.liveWatch.addToLiveWatch",
         "title": "Add to Live Watch",
         "icon": "$(plus)"
+      },
+      {
+        "command": "mcu-debug.cockpit.startDebugSession",
+        "title": "Start Debug Session from AI Cockpit",
+        "icon": "$(debug-start)"
       },
       {
         "category": "MCU-Debug",
@@ -474,6 +520,21 @@
         "command": "mcu-debug.liveWatch.addExpr",
         "title": "Add expression to Live Watch window",
         "icon": "$(plus)"
+      },
+      {
+        "category": "MCU-Debug",
+        "command": "mcu-debug.installCli",
+        "title": "Install CLI Tools"
+      },
+      {
+        "category": "MCU-Debug Developer",
+        "command": "mcu-debug.checkProxyExtension",
+        "title": "Check Proxy Extension"
+      },
+      {
+        "category": "MCU-Debug Developer",
+        "command": "mcu-debug.probeAgentStatus",
+        "title": "Show Probe Agent Status"
       },
       {
         "category": "MCU-AI-Debug",
@@ -513,7 +574,7 @@
       {
         "category": "MCU-AI-Debug",
         "command": "mcu-ai-debug.generateMcpConfig",
-        "title": "Generate MCP Configuration for AI Agents"
+        "title": "Generate MCP Configuration for AI Agents (Deprecated)"
       }
     ],
     "keybindings": [
@@ -1000,7 +1061,7 @@
                   },
                   "lifecycleManagedByParent": {
                     "default": true,
-                    "description": "Are Restart/Reset/Stop/Disconnect shared?",
+                    "description": "Are Reset/Stop/Disconnect shared?",
                     "type": "boolean"
                   },
                   "waitOnEvent": {
@@ -1074,7 +1135,7 @@
                         },
                         "lifecycleManagedByParent": {
                           "default": true,
-                          "description": "Are Restart/Reset/Stop/Disconnect shared?",
+                          "description": "Are Reset/Stop/Disconnect shared?",
                           "type": "boolean"
                         },
                         "overrides": {
@@ -1232,6 +1293,11 @@
                   ]
                 }
               },
+              "routeGdbServerOutputToDebugConsole": {
+                "type": "boolean",
+                "default": false,
+                "description": "Route GDB server output to debug console"
+              },
               "debugFlags": {
                 "description": "Debug flags to debug this extension (mcu-debug); Causes additional output in Debug Console.",
                 "type": "object",
@@ -1291,13 +1357,30 @@
                 "description": "This is for 'XPERIPHERALS' window provided by 'mcu-debug.peripheral-viewer' and 'Embedded Tools' Extension from Microsoft.",
                 "type": "string"
               },
-              "hostConfig": {
+              "cliOptions": {
                 "type": "object",
+                "description": "Options for the CLI output window (the 'Cockpit' or 'TUI' or 'Console'). These are not related to the GDB Server or GDB command line options, but rather options for how the CLI debugger displays the output from the debug session.",
+                "properties": {
+                  "logFile": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": ".mcu-debug/cli.log",
+                    "description": "Set the log file for the CLI output window (the 'Cockpit/TUI/Console', Setting to null disables logging). Command-line option overrides this setting if specified. Cannot use ${xxx} substitutions in the path because the CLI will use this path before it can perform substitutions, so the path is taken as-is. Absolute or relative to $cwd pf the CLI program."
+                  }
+                }
+              },
+              "hostConfig": {
+                "type": [
+                  "object",
+                  "boolean"
+                ],
                 "description": "Enables remote probe support. When present, the gdb-server runs on a host machine that has the USB debug probe attached. Omit this entirely for local debugging (the common case). The \"auto\" type detects the connection from the VS Code remote environment (WSL, Dev Container, VS Code Remote SSH, or plain local). The \"ssh\" type connects explicitly to a separate probe host machine via SSH, useful for lab setups where the probe is on a dedicated server.",
                 "properties": {
                   "enabled": {
                     "type": "boolean",
-                    "default": false,
+                    "default": true,
                     "description": "Enable/Disable remote probe support. When true, the gdb-server runs on a host machine that has the USB debug probe attached."
                   },
                   "type": {
@@ -1306,12 +1389,64 @@
                       "ssh"
                     ],
                     "default": "auto",
-                    "description": "\"auto\": extension detects the VS Code remote environment and constructs the correct proxy address automatically. Covers WSL (NAT and Mirrored), Dev Containers, VS Code Remote SSH, and plain local. \"ssh\": explicit SSH to a separate probe host; requires sshHost."
+                    "description": "\"auto\": extension detects the VS Code remote environment and constructs the correct proxy address automatically. Covers WSL (NAT and Mirrored), Dev Containers, VS Code Remote SSH, and plain local. \"ssh\": explicit SSH to a separate probe host; requires the `ssh` object below."
                   },
-                  "sshHost": {
-                    "type": "string",
-                    "description": "SSH host for type \"ssh\". Resolved via ~/.ssh/config, so host aliases, port, jump hosts, and keys are all handled there. Example: \"user@lab-server\" or an alias defined in ~/.ssh/config.",
-                    "default": "mylogin@myserver"
+                  "ssh": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "host"
+                    ],
+                    "description": "Settings for `type: \"ssh\"` — the probe is on a separate machine reached over SSH. Ignored for every other type. Grouping them keeps the SSH-only knobs together and lets the schema require a host whenever any of them is set.",
+                    "properties": {
+                      "host": {
+                        "type": "string",
+                        "description": "SSH host, resolved via ~/.ssh/config — so aliases, port, jump hosts and keys are all handled there. Example: \"user@lab-server\", or an alias defined in ~/.ssh/config.",
+                        "default": "mylogin@myserver"
+                      },
+                      "proxyPort": {
+                        "type": "number",
+                        "multipleOf": 1,
+                        "minimum": 1024,
+                        "maximum": 65535,
+                        "description": "Daemon mode: the port a Probe Agent is *already* listening on at the SSH host. When set, the extension connects to that agent instead of launching one, and the SSH -L tunnel is established from an OS-assigned local port to this one. When omitted, a new Probe Agent is launched per debug session and its port read from the Discovery JSON. Set this when the agent is started manually or managed by a system service on the probe host."
+                      },
+                      "token": {
+                        "type": "string",
+                        "description": "Authentication token of the pre-running agent named by `proxyPort`. Required with `proxyPort`, since an agent we did not launch has a token we cannot know. Ignored otherwise — an agent we launch is given a freshly generated token. Prefer \"${env:MDBG_PROXY_TOKEN}\" over a literal: a token committed to source control is a shared secret in your repository, and the agent reads the same variable."
+                      },
+                      "serverPath": {
+                        "type": "string",
+                        "description": "Path to a pre-installed mcu-debug binary on the SSH host (e.g. \"/usr/local/bin/mcu-debug\"). When set, the extension skips deploying the binary and launches this path directly. Use it when the host has the tool installed already, or when writing to ~/.mcu-debug/bin is not permitted."
+                      }
+                    }
+                  },
+                  "proxy": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "host",
+                      "port",
+                      "token"
+                    ],
+                    "description": "Connect to a Probe Agent you started yourself, instead of detecting the topology and launching one. When present, no auto-detection, no launching, and no SSH tunnel: the extension connects directly to host:port with token. Use it for a CLI-only container, a CI runner, a shared lab machine, or any setup where the agent's lifetime is managed outside the editor. All three fields are required — an endpoint without a token is rejected at the agent, which surfaces much later and is hard to diagnose. Not for SSH topologies: 'ssh' needs its -L tunnel established first, and Remote-SSH needs its reverse tunnel, so use `ssh.proxyPort` for a pre-running agent there.",
+                    "properties": {
+                      "host": {
+                        "type": "string",
+                        "description": "Address the debug adapter should dial to reach the Probe Agent, from wherever the adapter runs. Examples: \"127.0.0.1\" for the same machine, \"host.docker.internal\" from a Docker Desktop container, or a WSL gateway / LAN address. Must be an address the agent is actually bound to — check with `mcu-debug proxy --status` and look at `hosts`."
+                      },
+                      "port": {
+                        "type": "number",
+                        "multipleOf": 1,
+                        "minimum": 1024,
+                        "maximum": 65535,
+                        "description": "Port the Probe Agent is listening on. Shown as `port` in `mcu-debug proxy --status`."
+                      },
+                      "token": {
+                        "type": "string",
+                        "description": "Authentication token the agent was started with. Prefer \"${env:MDBG_PROXY_TOKEN}\" over a literal — a token committed to source control is a shared secret in your repository. The agent reads the same MDBG_PROXY_TOKEN variable, so one export configures both ends."
+                      }
+                    }
                   },
                   "syncFiles": {
                     "type": "array",
@@ -1330,15 +1465,122 @@
                       }
                     },
                     "default": []
-                  },
-                  "token": {
-                    "type": "string",
-                    "description": "Override the token used to authenticate with the Probe Agent. Only needed for daemon mode when the token file (~/.mcu-debug/agent.token) is not accessible, or when a fixed lab-policy token is preferred. When omitted, the extension auto-manages the token: it generates one for extension-launched agents, or reads it from the token file for pre-running daemons. Do NOT commit this value to source control — use VS Code user settings or a secrets manager."
                   }
                 },
                 "default": {
                   "enabled": true,
                   "type": "auto"
+                }
+              },
+              "serialConfig": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Enable/Disable serial port bridging. When enabled, the extension creates TCP bridges to physical serial ports for easy access to serial output from the target device."
+                },
+                "ports": {
+                  "type": "array",
+                  "description": "List of serial port bridges to expose as TCP ports. Each entry maps a physical serial device to a TCP port that can be connected to for bidirectional communication.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "description": "Serial device path or glob. E.g. /dev/ttyUSB0, /dev/tty.usbserial-*, COM3, /dev/serial/by-id/usb-*. Optional if serial or vid/pid are specified."
+                      },
+                      "match": {
+                        "type": "string",
+                        "description": "Case-insensitive substring matched against the port's description as reported by the OS (e.g. 'STM32 STLink', 'FTDI'). Used for selection, along with path, serial, or vid/pid. Use 'label' to name the port in the UI."
+                      },
+                      "serial": {
+                        "type": "string",
+                        "description": "USB serial number. Stable across reconnects and reboots — preferred in lab environments with multiple boards of the same type."
+                      },
+                      "vid": {
+                        "type": "string",
+                        "description": "USB vendor ID in hex (e.g. \"0x0483\"). Used with pid to identify the device type when serial is unavailable."
+                      },
+                      "pid": {
+                        "type": "string",
+                        "description": "USB product ID in hex (e.g. \"0x374b\"). Used with vid to identify the device type when serial is unavailable."
+                      },
+                      "baud_rate": {
+                        "type": "number",
+                        "multipleOf": 1,
+                        "minimum": 300,
+                        "default": 115200,
+                        "description": "Baud rate in bits per second."
+                      },
+                      "data_bits": {
+                        "type": "number",
+                        "enum": [
+                          5,
+                          6,
+                          7,
+                          8
+                        ],
+                        "default": 8,
+                        "description": "Number of data bits per frame."
+                      },
+                      "stop_bits": {
+                        "type": "string",
+                        "enum": [
+                          "one",
+                          "one_point_five",
+                          "two"
+                        ],
+                        "default": "one",
+                        "description": "Number of stop bits."
+                      },
+                      "parity": {
+                        "type": "string",
+                        "enum": [
+                          "none",
+                          "odd",
+                          "even"
+                        ],
+                        "default": "none",
+                        "description": "Parity checking mode."
+                      },
+                      "flow_control": {
+                        "type": "string",
+                        "enum": [
+                          "none",
+                          "software",
+                          "hardware"
+                        ],
+                        "default": "none",
+                        "description": "Flow control mode. \"software\" = XON/XOFF, \"hardware\" = RTS/CTS."
+                      },
+                      "log_file": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Optional file path to log all serial data (both input and output). If not set, no logging is performed."
+                      },
+                      "input_mode": {
+                        "type": "string",
+                        "enum": [
+                          "raw",
+                          "cooked"
+                        ],
+                        "default": "cooked",
+                        "description": "Input mode for data sent to the serial port. \"raw\" = send as-is, immediately, \"cooked\" = buffer input until Enter is pressed and perform basic line editing (backspace, Ctrl+U to clear line)."
+                      },
+                      "label": {
+                        "type": "string",
+                        "description": "A label for this serial port bridge, used in the extension UI to identify it. E.g. 'Debug UART'. Optional but recommended when multiple ports are configured."
+                      }
+                    }
+                  }
+                },
+                "default": {
+                  "enabled": true,
+                  "ports": [
+                    {
+                      "path": "/dev/ttyUSB0 (or COM3 on Windows)",
+                      "baud_rate": 115200
+                    }
+                  ]
                 }
               },
               "rttConfig": {
@@ -1382,7 +1624,10 @@
                     "default": "SEGGER RTT"
                   },
                   "useBuiltinRTT": {
-                    "type": "object",
+                    "type": [
+                      "boolean",
+                      "object"
+                    ],
                     "description": "Use the built-in RTT support (recommended) especially with servers no native RTT support. If false, use gdb-server's RTT support, which may have better performance, but harder to setup.",
                     "properties": {
                       "enabled": {
@@ -1400,7 +1645,7 @@
                           "number",
                           "null"
                         ],
-                        "description": "Fixed port number to use for built-in RTT server. If not set, a free port is chosen automatically.",
+                        "description": "Optional fixed port number to use for built-in RTT server. If not set, a free port is chosen automatically.",
                         "default": null,
                         "minimum": 1024,
                         "maximum": 65535,
@@ -2438,7 +2683,7 @@
                   },
                   "lifecycleManagedByParent": {
                     "default": true,
-                    "description": "Are Restart/Reset/Stop/Disconnect shared?",
+                    "description": "Are Reset/Stop/Disconnect shared?",
                     "type": "boolean"
                   },
                   "waitOnEvent": {
@@ -2512,7 +2757,7 @@
                         },
                         "lifecycleManagedByParent": {
                           "default": true,
-                          "description": "Are Restart/Reset/Stop/Disconnect shared?",
+                          "description": "Are Reset/Stop/Disconnect shared?",
                           "type": "boolean"
                         },
                         "overrides": {
@@ -2670,6 +2915,11 @@
                   ]
                 }
               },
+              "routeGdbServerOutputToDebugConsole": {
+                "type": "boolean",
+                "default": false,
+                "description": "Route GDB server output to debug console"
+              },
               "debugFlags": {
                 "description": "Debug flags to debug this extension (mcu-debug); Causes additional output in Debug Console.",
                 "type": "object",
@@ -2729,13 +2979,30 @@
                 "description": "This is for 'XPERIPHERALS' window provided by 'mcu-debug.peripheral-viewer' and 'Embedded Tools' Extension from Microsoft.",
                 "type": "string"
               },
-              "hostConfig": {
+              "cliOptions": {
                 "type": "object",
+                "description": "Options for the CLI output window (the 'Cockpit' or 'TUI' or 'Console'). These are not related to the GDB Server or GDB command line options, but rather options for how the CLI debugger displays the output from the debug session.",
+                "properties": {
+                  "logFile": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": ".mcu-debug/cli.log",
+                    "description": "Set the log file for the CLI output window (the 'Cockpit/TUI/Console', Setting to null disables logging). Command-line option overrides this setting if specified. Cannot use ${xxx} substitutions in the path because the CLI will use this path before it can perform substitutions, so the path is taken as-is. Absolute or relative to $cwd pf the CLI program."
+                  }
+                }
+              },
+              "hostConfig": {
+                "type": [
+                  "object",
+                  "boolean"
+                ],
                 "description": "Enables remote probe support. When present, the gdb-server runs on a host machine that has the USB debug probe attached. Omit this entirely for local debugging (the common case). The \"auto\" type detects the connection from the VS Code remote environment (WSL, Dev Container, VS Code Remote SSH, or plain local). The \"ssh\" type connects explicitly to a separate probe host machine via SSH, useful for lab setups where the probe is on a dedicated server.",
                 "properties": {
                   "enabled": {
                     "type": "boolean",
-                    "default": false,
+                    "default": true,
                     "description": "Enable/Disable remote probe support. When true, the gdb-server runs on a host machine that has the USB debug probe attached."
                   },
                   "type": {
@@ -2744,12 +3011,64 @@
                       "ssh"
                     ],
                     "default": "auto",
-                    "description": "\"auto\": extension detects the VS Code remote environment and constructs the correct proxy address automatically. Covers WSL (NAT and Mirrored), Dev Containers, VS Code Remote SSH, and plain local. \"ssh\": explicit SSH to a separate probe host; requires sshHost."
+                    "description": "\"auto\": extension detects the VS Code remote environment and constructs the correct proxy address automatically. Covers WSL (NAT and Mirrored), Dev Containers, VS Code Remote SSH, and plain local. \"ssh\": explicit SSH to a separate probe host; requires the `ssh` object below."
                   },
-                  "sshHost": {
-                    "type": "string",
-                    "description": "SSH host for type \"ssh\". Resolved via ~/.ssh/config, so host aliases, port, jump hosts, and keys are all handled there. Example: \"user@lab-server\" or an alias defined in ~/.ssh/config.",
-                    "default": "mylogin@myserver"
+                  "ssh": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "host"
+                    ],
+                    "description": "Settings for `type: \"ssh\"` — the probe is on a separate machine reached over SSH. Ignored for every other type. Grouping them keeps the SSH-only knobs together and lets the schema require a host whenever any of them is set.",
+                    "properties": {
+                      "host": {
+                        "type": "string",
+                        "description": "SSH host, resolved via ~/.ssh/config — so aliases, port, jump hosts and keys are all handled there. Example: \"user@lab-server\", or an alias defined in ~/.ssh/config.",
+                        "default": "mylogin@myserver"
+                      },
+                      "proxyPort": {
+                        "type": "number",
+                        "multipleOf": 1,
+                        "minimum": 1024,
+                        "maximum": 65535,
+                        "description": "Daemon mode: the port a Probe Agent is *already* listening on at the SSH host. When set, the extension connects to that agent instead of launching one, and the SSH -L tunnel is established from an OS-assigned local port to this one. When omitted, a new Probe Agent is launched per debug session and its port read from the Discovery JSON. Set this when the agent is started manually or managed by a system service on the probe host."
+                      },
+                      "token": {
+                        "type": "string",
+                        "description": "Authentication token of the pre-running agent named by `proxyPort`. Required with `proxyPort`, since an agent we did not launch has a token we cannot know. Ignored otherwise — an agent we launch is given a freshly generated token. Prefer \"${env:MDBG_PROXY_TOKEN}\" over a literal: a token committed to source control is a shared secret in your repository, and the agent reads the same variable."
+                      },
+                      "serverPath": {
+                        "type": "string",
+                        "description": "Path to a pre-installed mcu-debug binary on the SSH host (e.g. \"/usr/local/bin/mcu-debug\"). When set, the extension skips deploying the binary and launches this path directly. Use it when the host has the tool installed already, or when writing to ~/.mcu-debug/bin is not permitted."
+                      }
+                    }
+                  },
+                  "proxy": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "host",
+                      "port",
+                      "token"
+                    ],
+                    "description": "Connect to a Probe Agent you started yourself, instead of detecting the topology and launching one. When present, no auto-detection, no launching, and no SSH tunnel: the extension connects directly to host:port with token. Use it for a CLI-only container, a CI runner, a shared lab machine, or any setup where the agent's lifetime is managed outside the editor. All three fields are required — an endpoint without a token is rejected at the agent, which surfaces much later and is hard to diagnose. Not for SSH topologies: 'ssh' needs its -L tunnel established first, and Remote-SSH needs its reverse tunnel, so use `ssh.proxyPort` for a pre-running agent there.",
+                    "properties": {
+                      "host": {
+                        "type": "string",
+                        "description": "Address the debug adapter should dial to reach the Probe Agent, from wherever the adapter runs. Examples: \"127.0.0.1\" for the same machine, \"host.docker.internal\" from a Docker Desktop container, or a WSL gateway / LAN address. Must be an address the agent is actually bound to — check with `mcu-debug proxy --status` and look at `hosts`."
+                      },
+                      "port": {
+                        "type": "number",
+                        "multipleOf": 1,
+                        "minimum": 1024,
+                        "maximum": 65535,
+                        "description": "Port the Probe Agent is listening on. Shown as `port` in `mcu-debug proxy --status`."
+                      },
+                      "token": {
+                        "type": "string",
+                        "description": "Authentication token the agent was started with. Prefer \"${env:MDBG_PROXY_TOKEN}\" over a literal — a token committed to source control is a shared secret in your repository. The agent reads the same MDBG_PROXY_TOKEN variable, so one export configures both ends."
+                      }
+                    }
                   },
                   "syncFiles": {
                     "type": "array",
@@ -2768,15 +3087,122 @@
                       }
                     },
                     "default": []
-                  },
-                  "token": {
-                    "type": "string",
-                    "description": "Override the token used to authenticate with the Probe Agent. Only needed for daemon mode when the token file (~/.mcu-debug/agent.token) is not accessible, or when a fixed lab-policy token is preferred. When omitted, the extension auto-manages the token: it generates one for extension-launched agents, or reads it from the token file for pre-running daemons. Do NOT commit this value to source control — use VS Code user settings or a secrets manager."
                   }
                 },
                 "default": {
                   "enabled": true,
                   "type": "auto"
+                }
+              },
+              "serialConfig": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Enable/Disable serial port bridging. When enabled, the extension creates TCP bridges to physical serial ports for easy access to serial output from the target device."
+                },
+                "ports": {
+                  "type": "array",
+                  "description": "List of serial port bridges to expose as TCP ports. Each entry maps a physical serial device to a TCP port that can be connected to for bidirectional communication.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "description": "Serial device path or glob. E.g. /dev/ttyUSB0, /dev/tty.usbserial-*, COM3, /dev/serial/by-id/usb-*. Optional if serial or vid/pid are specified."
+                      },
+                      "match": {
+                        "type": "string",
+                        "description": "Case-insensitive substring matched against the port's description as reported by the OS (e.g. 'STM32 STLink', 'FTDI'). Used for selection, along with path, serial, or vid/pid. Use 'label' to name the port in the UI."
+                      },
+                      "serial": {
+                        "type": "string",
+                        "description": "USB serial number. Stable across reconnects and reboots — preferred in lab environments with multiple boards of the same type."
+                      },
+                      "vid": {
+                        "type": "string",
+                        "description": "USB vendor ID in hex (e.g. \"0x0483\"). Used with pid to identify the device type when serial is unavailable."
+                      },
+                      "pid": {
+                        "type": "string",
+                        "description": "USB product ID in hex (e.g. \"0x374b\"). Used with vid to identify the device type when serial is unavailable."
+                      },
+                      "baud_rate": {
+                        "type": "number",
+                        "multipleOf": 1,
+                        "minimum": 300,
+                        "default": 115200,
+                        "description": "Baud rate in bits per second."
+                      },
+                      "data_bits": {
+                        "type": "number",
+                        "enum": [
+                          5,
+                          6,
+                          7,
+                          8
+                        ],
+                        "default": 8,
+                        "description": "Number of data bits per frame."
+                      },
+                      "stop_bits": {
+                        "type": "string",
+                        "enum": [
+                          "one",
+                          "one_point_five",
+                          "two"
+                        ],
+                        "default": "one",
+                        "description": "Number of stop bits."
+                      },
+                      "parity": {
+                        "type": "string",
+                        "enum": [
+                          "none",
+                          "odd",
+                          "even"
+                        ],
+                        "default": "none",
+                        "description": "Parity checking mode."
+                      },
+                      "flow_control": {
+                        "type": "string",
+                        "enum": [
+                          "none",
+                          "software",
+                          "hardware"
+                        ],
+                        "default": "none",
+                        "description": "Flow control mode. \"software\" = XON/XOFF, \"hardware\" = RTS/CTS."
+                      },
+                      "log_file": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Optional file path to log all serial data (both input and output). If not set, no logging is performed."
+                      },
+                      "input_mode": {
+                        "type": "string",
+                        "enum": [
+                          "raw",
+                          "cooked"
+                        ],
+                        "default": "cooked",
+                        "description": "Input mode for data sent to the serial port. \"raw\" = send as-is, immediately, \"cooked\" = buffer input until Enter is pressed and perform basic line editing (backspace, Ctrl+U to clear line)."
+                      },
+                      "label": {
+                        "type": "string",
+                        "description": "A label for this serial port bridge, used in the extension UI to identify it. E.g. 'Debug UART'. Optional but recommended when multiple ports are configured."
+                      }
+                    }
+                  }
+                },
+                "default": {
+                  "enabled": true,
+                  "ports": [
+                    {
+                      "path": "/dev/ttyUSB0 (or COM3 on Windows)",
+                      "baud_rate": 115200
+                    }
+                  ]
                 }
               },
               "rttConfig": {
@@ -2820,7 +3246,10 @@
                     "default": "SEGGER RTT"
                   },
                   "useBuiltinRTT": {
-                    "type": "object",
+                    "type": [
+                      "boolean",
+                      "object"
+                    ],
                     "description": "Use the built-in RTT support (recommended) especially with servers no native RTT support. If false, use gdb-server's RTT support, which may have better performance, but harder to setup.",
                     "properties": {
                       "enabled": {
@@ -2838,7 +3267,7 @@
                           "number",
                           "null"
                         ],
-                        "description": "Fixed port number to use for built-in RTT server. If not set, a free port is chosen automatically.",
+                        "description": "Optional fixed port number to use for built-in RTT server. If not set, a free port is chosen automatically.",
                         "default": null,
                         "minimum": 1024,
                         "maximum": 65535,
@@ -3556,6 +3985,14 @@
           "when": "debugType == mcu-debug"
         },
         {
+          "command": "mcu-debug.pauseAll",
+          "when": "debugType == mcu-debug && mcu-debug:chainedSessionsActive"
+        },
+        {
+          "command": "mcu-debug.resumeAll",
+          "when": "debugType == mcu-debug && mcu-debug:chainedSessionsActive"
+        },
+        {
           "command": "mcu-debug.toggleVariableHexFormat",
           "when": "debugType == mcu-debug"
         },
@@ -3566,8 +4003,18 @@
       ],
       "debug/toolBar": [
         {
+          "command": "mcu-debug.pauseAll",
+          "group": "navigation@50",
+          "when": "debugType == mcu-debug && mcu-debug:chainedSessionsActive && mcu-debug:hasRunningSessions"
+        },
+        {
+          "command": "mcu-debug.resumeAll",
+          "group": "navigation@51",
+          "when": "debugType == mcu-debug && mcu-debug:chainedSessionsActive && mcu-debug:hasStoppedSessions"
+        },
+        {
           "command": "mcu-debug.resetDevice",
-          "group": "navigation",
+          "group": "navigation@52",
           "when": "debugType == mcu-debug"
         }
       ],
@@ -3593,10 +4040,16 @@
           "group": "inline"
         }
       ],
+      "webview/context": [
+        {
+          "command": "mcu-debug.cockpit.clear",
+          "when": "webviewSection == 'mcu-debug.cockpit.terminal'"
+        }
+      ],
       "view/title": [
         {
-          "command": "mcu-ai-debug.liveWatch.toggleBatchEdit",
-          "when": "view == mcu-debug.liveWatch",
+          "command": "mcu-debug.cockpit.addUart",
+          "when": "view == mcu-debug.cockpit",
           "group": "navigation"
         },
         {
@@ -3653,6 +4106,11 @@
           "command": "mcu-debug.varHexModeTurnOff",
           "when": "view == mcu-debug.liveWatch && inDebugMode && debugType == 'mcu-debug' && debugState == stopped && !mcu-debug:variableUseNaturalFormat",
           "group": "navigation"
+        },
+        {
+          "command": "mcu-ai-debug.liveWatch.toggleBatchEdit",
+          "when": "view == mcu-debug.liveWatch",
+          "group": "navigation"
         }
       ],
       "debug/variables/context": [
@@ -3671,6 +4129,13 @@
       ]
     },
     "viewsContainers": {
+      "panel": [
+        {
+          "id": "mcu-debug-panel",
+          "title": "MCU Debug",
+          "icon": "images/mcu-debug-panel.svg"
+        }
+      ],
       "activitybar": [
         {
           "id": "mcu-ai-debug",
@@ -3689,6 +4154,14 @@
           "contextualTitle": "Live Watch",
           "when": "debugType == mcu-debug"
         }
+      ],
+      "mcu-debug-panel": [
+        {
+          "type": "webview",
+          "id": "mcu-debug.cockpit",
+          "name": "MCU Debug",
+          "icon": "images/mcu-debug-128x128.png"
+        }
       ]
     }
   },
@@ -3696,8 +4169,10 @@
     "copy-codicons": "node scripts/copy-codicons.js",
     "generate-manifest": "node scripts/update-package-json.js",
     "update-commit-hash": "node scripts/commit-hash.js",
-    "build-rust-dev": "node scripts/build-rust.js dev",
-    "compile": "npm run build-rust-dev && npm run copy-codicons && npm run generate-manifest && npm run update-commit-hash && npm run check-types && node esbuild.js",
+    "build:rust:dev": "node scripts/build-rust.js dev",
+    "fetch-bin": "node scripts/fetch-bin.js",
+    "build-cockpit": "npm --prefix src/webviews/cockpit install && npm --prefix src/webviews/cockpit run build",
+    "compile": "npm run build:rust:dev && npm run copy-codicons && npm run build-cockpit && npm run generate-manifest && npm run update-commit-hash && npm run check-types && node esbuild.js",
     "build": "npm run build-all",
     "check-types": "tsc-strict --noEmit",
     "test:unit": "node --import tsx --test src/test/**/*.test.ts",
@@ -3705,29 +4180,27 @@
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc-strict --noEmit --watch --project tsconfig.json",
     "vscode:prepublish": "npm run build-all",
-    "build-rust-prod": "node scripts/build-rust.js prod",
-    "build-all": "npm run build-rust-prod && npm run copy-codicons && npm run generate-manifest && npm run update-commit-hash && npm run check-types && node esbuild.js --production",
-    "package": "vsce package --no-dependencies"
+    "build:rust:prod": "node scripts/build-rust.js prod",
+    "build-all": "npm run build:rust:prod && npm run generate-manifest && npm run update-commit-hash && npm run build-cockpit && npm run check-types && node esbuild.js --production",
+    "package": "vsce package --no-dependencies",
+    "test:integration": "node --import tsx --test src/test/**/*.integration.ts",
+    "test": "npm run test:unit"
   },
   "devDependencies": {
     "@flatten-js/interval-tree": "^2.0.3",
     "@mcu-debug/shared": "*",
     "@types/hasbin": "^1.2.2",
     "@types/node": "^25.0.9",
-    "@types/proper-lockfile": "^4.1.4",
     "@types/tmp": "^0.2.6",
-    "@types/vscode": "^1.80.0",
+    "@types/vscode": "^1.107.0",
     "@vscode/debugadapter": "^1.68.0",
     "@vscode/debugprotocol": "^1.68.0",
-    "@vscode/extension-telemetry": "^1.2.0",
-    "applicationinsights": "^3.13.0",
     "binary-parser": "^2.3.0",
-    "esbuild": "^0.27.2",
+    "esbuild": "^0.28.0",
     "esbuild-node-externals": "^1.20.1",
     "hasbin": "^1.2.3",
     "npm-run-all": "^4.1.5",
     "prettier": "^3.8.0",
-    "proper-lockfile": "^4.1.2",
     "ring-buffer-ts": "^1.2.0",
     "serialport": "^13.0.0",
     "tmp": "^0.2.5",
@@ -3740,7 +4213,20 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@vscode/codicons": "^0.0.44",
+    "ajv-formats": "^3.0.1",
+    "ansi-colors": "^4.1.3",
+    "commander": "^14.0.3",
+    "find-process": "^2.1.1",
     "glob": "^13.0.6",
-    "sorted-array-type": "^1.3.0"
-  }
+    "jsonc-simple-parser": "^3.0.0",
+    "jsonpatch": "^3.1.0",
+    "sorted-array-type": "^1.3.0",
+    "triple-beam": "^1.4.1"
+  },
+  "extensionDependencies": [
+    "mcu-debug.debug-tracker-vscode",
+    "mcu-debug.memory-view",
+    "mcu-debug.rtos-views",
+    "mcu-debug.peripheral-viewer"
+  ]
 }

@@ -1,11 +1,9 @@
 import { ChildProcess, spawn } from "child_process";
+import * as os from "os";
 import { EventEmitter } from "events";
 import { parseGdbMiOut } from "./mi-parser";
-import { GdbEventNames, GdbMiOutputType, GdbMiRecord, Stderr, Stdout, Console, GdbMiOutput, MINode } from "./mi-types";
-import { GdbMiRecordType } from "./mi-types";
+import { GdbEventNames, GdbMiRecord, Stderr, Stdout, Console, GdbMiOutput } from "./mi-types";
 import { ServerConsoleLog } from "../server-console-log";
-import { receiveMessageOnPort } from "worker_threads";
-import { VariableObject } from "../variables";
 import { DebugFlags } from "../servers/common";
 import { MiCommands } from "./mi-commands";
 
@@ -15,7 +13,7 @@ class PendingCmdPromise {
         public readonly cmd: string,
         public readonly resolve: (value: GdbMiOutput) => void,
         public readonly reject: (reason?: any) => void,
-    ) {}
+    ) { }
 }
 
 export class GdbInstance extends EventEmitter {
@@ -62,55 +60,45 @@ export class GdbInstance extends EventEmitter {
         this.processCommandQueue();
     }
 
-    private startupTimer: NodeJS.Timeout | undefined;
-
-    private clearStartupTimer(): void {
-        if (this.startupTimer) {
-            clearInterval(this.startupTimer);
-            this.startupTimer = undefined;
-        }
-    }
-
-    private setupStartupTimer(gdbPath: string, reject: (reason?: any) => void): void {
-        const maxSeconds = 60;
+    private startupTimer: NodeJS.Timeout | undefined = undefined;
+    private setupStartupTimer(gdbPath: string, reject: (any)) {
+        // Why such a long timeout? Because some GDB versions are really slow to start up, especially if they have to
+        // load a lot of pretty-printers. We want to give them enough time, but also provide feedback to the user that
+        // something is happening and we're not just hanging indefinitely. Another reason on Windows is that antivirus
+        // software can cause significant delays in process startup, so we want to be tolerant of that as well.
+        // One user measured 20 (+/- 2) seconds startup time for GDB on Windows with IT forced antivirus, which is
+        // unfortunately not uncommon, other have reported > 10 secs
+        const maxSeconds = os.platform() === "win32" ? 120 : 20;
         const start = Date.now();
-        let lastMessage = start;
-
+        let msgTime = start;
         this.startupTimer = setInterval(() => {
             const now = Date.now();
-            if (now - lastMessage >= 5000) {
+            if ((now - msgTime) > 5000) {
                 ServerConsoleLog(`Waiting for GDB process to start... (${Math.floor((now - start) / 1000)}s)`);
-                lastMessage = now;
+                msgTime = now;
             }
-            if (now - start < maxSeconds * 1000) {
-                return;
+            const elapsed = now - start;
+            if (elapsed > (maxSeconds * 1000)) {
+                if (this.process) try {
+                    this.process.kill();
+                    this.process = null;
+                } catch { }
+                clearInterval(this.startupTimer);
+                this.startupTimer = undefined;
+                reject(new Error(`GDB process failed to start within ${maxSeconds} seconds. Check your gdb installation by running '${gdbPath} --version' `
+                    + "in a terminal. If your gdb is very slow to start, you can try disabling antivirus software or switching to a faster gdb version."));
             }
-
-            const process = this.process;
-            this.process = null;
-            try {
-                process?.kill();
-            } catch {
-                // The timeout error below is the useful failure to report.
-            }
-            this.clearStartupTimer();
-            reject(
-                new Error(
-                    `GDB process failed to start within ${maxSeconds} seconds. Check '${gdbPath} --version' in a terminal. ` +
-                        "If GDB starts very slowly, check antivirus software or use a faster GDB build.",
-                ),
-            );
         }, 250);
     }
 
-    start(gdbPath: string, gdbArgs: string[], cwd: string | undefined, init: string[], timeout: number = 250, checkVers = true): Promise<void> {
+    start(gdbPath: string, gdbArgs: string[], cwd: string | undefined, init: string[], checkVers = true): Promise<void> {
         this.gdbPath = gdbPath;
         this.gdbArgs = gdbArgs;
         return new Promise(async (resolve, reject) => {
             const doInitCmds = async () => {
                 for (const cmd of init) {
                     try {
-                        await this.sendCommand(cmd, timeout);
+                        await this.sendCommand(cmd);
                     } catch (e) {
                         throw new Error(`Failed to execute init command '${cmd}': ${e}`);
                     }
@@ -122,7 +110,7 @@ export class GdbInstance extends EventEmitter {
             }
 
             ServerConsoleLog(`Starting GDB: ${gdbPath} ${gdbArgs.join(" ")}, cwd=${cwd}`);
-            const child = spawn(gdbPath, gdbArgs, { cwd: cwd, env: process.env });
+            const child = spawn(gdbPath, gdbArgs, { cwd: cwd, env: process.env, windowsHide: true });
             this.process = child;
             this.pid = child.pid!;
             ServerConsoleLog(`Started GDB: PID=${this.pid}`);
@@ -135,19 +123,22 @@ export class GdbInstance extends EventEmitter {
 
             if (checkVers) {
                 try {
-                    // The overall startup timer handles this first probe, allowing unusually slow GDB builds to start.
-                    const disableGdbTimeouts = this.debugFlags.disableGdbTimeouts;
-                    let majorPromise: Promise<string>;
-                    try {
-                        this.debugFlags.disableGdbTimeouts = true;
-                        majorPromise = this.miCommands.sendDataEvaluateExpression<string>("$_gdb_major");
-                    } finally {
-                        this.debugFlags.disableGdbTimeouts = disableGdbTimeouts;
+                    // This very first command is super important. An improperly installed gdb hangs forever and does not respond to anything,
+                    // so we need to know as soon as possible if we can talk to it. While we disable the sendCommand timeout for this first command,
+                    // we also have an overall startup timer that will reject if we don't get a response within a reasonable time
+                    const save = this.debugFlags.disableGdbTimeouts;
+                    this.debugFlags.disableGdbTimeouts = true; // Disable timeouts for these version check commands, as GDB can be very slow to start up
+                    const majorPromise = this.miCommands.sendDataEvaluateExpression<string>("$_gdb_major");
+                    this.debugFlags.disableGdbTimeouts = save;
+                    this.gdbMajorVersion = parseInt(await majorPromise);
+                    if (this.startupTimer) {
+                        clearInterval(this.startupTimer);       // First command succeeded, so we know GDB is up and responsive, stop the startup timer
+                        this.startupTimer = undefined;
                     }
-                    const major = await majorPromise;
-                    this.clearStartupTimer();
+
+                    // From now on it should be safe to use the normal command timeout, as we know GDB is responsive. If the version is old,
+                    // some commands might not work, but at least we won't hang indefinitely.
                     const minor = await this.miCommands.sendDataEvaluateExpression<string>("$_gdb_minor");
-                    this.gdbMajorVersion = parseInt(major);
                     this.gdbMinorVersion = parseInt(minor);
                     if (this.gdbMajorVersion < 9 || (this.gdbMajorVersion === 9 && this.gdbMinorVersion < 1)) {
                         this.log(GdbEventNames.Stderr, `ERROR: GDB version ${this.gdbMajorVersion}.${this.gdbMinorVersion} is not supported. Please upgrade to GDB version 9.1 or higher.`);
@@ -161,28 +152,14 @@ export class GdbInstance extends EventEmitter {
                     }
                     return;
                 } catch (e) {
-                    this.clearStartupTimer();
+                    if (this.startupTimer) {
+                        clearInterval(this.startupTimer);
+                        this.startupTimer = undefined;
+                    }
                     // these convenience variables don't exist in older GDB versions
                     ServerConsoleLog("Failed to get GDB version using $_gdb_major/minor variables");
                     reject(new Error("Failed to get GDB version using $_gdb_major/minor variables. GDB version 9.1 or higher is required."));
                 }
-                /*
-                this.sendCommand("-gdb-version", timeout)
-                    .then((output) => {
-                        this.log(GdbEventNames.Stdout, output.toString());
-                        const lines = output.outOfBandRecords.filter((rec) => rec.recordType === "stream" && rec.outputType === "console");
-                        this.parseVersionInfo(lines.map((rec) => rec.result));
-                        try {
-                            doInitCmds();
-                            resolve();
-                        } catch (e) {
-                            reject(e);
-                        }
-                    })
-                    .catch(() => {
-                        reject(new Error("GDB did not respond to -gdb-version command"));
-                    });
-                    */
             } else {
                 try {
                     await doInitCmds();
@@ -292,8 +269,11 @@ export class GdbInstance extends EventEmitter {
                 if (pendingCmd) {
                     if (miOutput.resultRecord?.class === "error") {
                         const result = miOutput.resultRecord.result as { [key: string]: any };
-                        const errorMsg = result["msg"] || "Unknown error";
-                        pendingCmd.reject(new Error(`GDB: ${errorMsg}`));
+                        const obj = {
+                            command: pendingCmd.cmd,
+                            message: result["msg"] || "Unknown error"
+                        };
+                        pendingCmd.reject(new Error(`GDB: ${JSON.stringify(obj)}`));
                     } else {
                         if (miOutput.resultRecord?.class === "connected") {
                             this.emit("connected");
@@ -341,9 +321,9 @@ export class GdbInstance extends EventEmitter {
                             this.log(Console, record.result as string);
                         }
                     } else if (record.outputType === "target") {
-                        this.log(Stdout, record.result as string);
+                        this.log(Console, record.result as string);
                     } else if (record.outputType === "log") {
-                        this.log(Stderr, record.result as string);
+                        this.log(Console, record.result as string);
                     }
                 }
             }
@@ -377,14 +357,14 @@ export class GdbInstance extends EventEmitter {
         } else if (reason === "exited") {
             // exit with error code != 0
             const result = record.result as { [key: string]: any };
-            this.log(Stderr, "Program exited with code " + result["exit-code"]);
+            this.log(Stdout, "Program exited with code " + result["exit-code"]);
             this.emit("exited-normally", record);
         } else if (reason === undefined && this.firstStop) {
             reason = "entry";
-            this.log(Console, "Program stopped, probably due to a reset and/or halt issued by debugger");
+            this.log(Stdout, "Program stopped, probably due to a reset and/or halt issued by debugger");
         } else {
             reason = reason || "unknown";
-            this.log(Console, "Not implemented stop reason (assuming exception): " + reason || "Unknown reason");
+            this.log(Stdout, "Not implemented stop reason (assuming exception): " + reason || "Unknown reason");
         }
         this.firstStop = false;
         this.emit(GdbEventNames.Stopped, record, reason);

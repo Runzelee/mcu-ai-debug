@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import { getNonce } from "../../adapter/servers/common";
+import { generateNonce } from "@mcu-debug/shared";
 
 /**
  * Live Watch real-time waveform graph manager.
@@ -142,7 +142,7 @@ export class LiveWatchGrapher {
     }
 
     private getHTML(): string {
-        const nonce = getNonce();
+        const nonce = generateNonce();
         const scriptUri = this.panel!.webview.asWebviewUri(
             vscode.Uri.file(path.join(this.extensionPath, "resources", "live-watch-graph.js")),
         );

@@ -1,0 +1,64 @@
+import { Parser } from "binary-parser";
+
+const SignedParser = new Parser().endianess("little").int32("value");
+const UnsignedParser = new Parser().endianess("little").uint32("value");
+const FloatParser = new Parser().endianess("little").floatle("value");
+
+export function parseFloat(buffer: Buffer): number {
+    if (buffer.length < 4) {
+        const tmp = Buffer.alloc(4);
+        buffer.copy(tmp);
+        buffer = tmp;
+    }
+
+    const result: { value: number } = FloatParser.parse(buffer);
+    return result.value;
+}
+
+export function parseSigned(buffer: Buffer): number {
+    if (buffer.length < 4) {
+        const tmp = Buffer.alloc(4);
+        buffer.copy(tmp);
+        buffer = tmp;
+    }
+
+    const result: { value: number } = SignedParser.parse(buffer);
+    return result.value;
+}
+
+export function parseUnsigned(buffer: Buffer): number {
+    if (buffer.length < 4) {
+        const tmp = Buffer.alloc(4);
+        buffer.copy(tmp);
+        buffer = tmp;
+    }
+
+    const result: { value: number } = UnsignedParser.parse(buffer);
+    return result.value;
+}
+
+export function parseQ(buffer: Buffer, _mask: number, shift: number) {
+    const value = parseSigned(buffer);
+
+    // Qm.n fixed-point stores a signed 32-bit integer scaled by 2^n.
+    return value / 2 ** shift;
+}
+
+export function parseUQ(buffer: Buffer, _mask: number, shift: number) {
+    const value = parseUnsigned(buffer);
+
+    // UQm.n fixed-point uses the same scale as Qm.n without signed interpretation.
+    return value / 2 ** shift;
+}
+
+export const decoders: { [key: string]: (buf: Buffer) => number } = {
+    signed: parseSigned,
+    float: parseFloat,
+    Q8_24: (buffer) => parseQ(buffer, 0xffffff, 24),
+    Q16_16: (buffer) => parseQ(buffer, 0xffff, 16),
+    Q24_8: (buffer) => parseQ(buffer, 0xff, 8),
+    UQ8_24: (buffer) => parseUQ(buffer, 0xffffff, 24),
+    UQ16_16: (buffer) => parseUQ(buffer, 0xffff, 16),
+    UQ24_8: (buffer) => parseUQ(buffer, 0xff, 8),
+    unsigned: parseUnsigned,
+};
