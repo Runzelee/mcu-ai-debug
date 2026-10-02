@@ -268,8 +268,8 @@ reason, and an AI agent matching on the documented `Reason - ` never matched.
 
 **Do not edit the `version` field in any `package.json` or `Cargo.toml`.** Three files carry a
 version and they must agree — `packages/mcu-debug/package.json`,
-`packages/mcu-debug-proxy/package.json`, and `packages/mdbg/Cargo.toml`. The two extensions ship
-as a matched pair and the release script refuses to publish if they differ.
+`packages/mcu-debug-proxy/package.json`, and `packages/mdbg/Cargo.toml`. The fork extension, companion development package and native runtime stay aligned.
+Fork releases publish only the fork-owned VSIX; the shared version check still refuses drift.
 
 **Lockstep is doing real work, not bookkeeping.** It is what lets the wire types between the two
 extensions — and between them and `mdbg` — have no compatibility story at all: matched versions
@@ -286,8 +286,8 @@ The single source of truth is the `VERSION` constant at the top of `scripts/sync
 **How to apply:** edit that constant, then run `npm run version:sync` to propagate it. Verify with
 `node scripts/sync-versions.js --check`, which reports any file that drifted and exits non-zero —
 that is also what `npm run build` runs, so a hand-edited manifest surfaces as a build failure
-rather than a bad release. Version numbering itself (odd minor means pre-release) and the release
-flow are in [docs-internal/Publishing.md](docs-internal/Publishing.md).
+rather than a bad release. The fork release flow uses tags, with no inherited odd-minor prerelease heuristic;
+see [docs/upstream-porting-2026-10.md](docs/upstream-porting-2026-10.md).
 
 ## Types crossing the Rust/TS boundary: authored in Rust, generated to TS
 

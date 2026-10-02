@@ -1,183 +1,31 @@
-# Publishing mcu-debug
+# Publishing MCU AI Debug
 
-How releases actually get out the door. Most of this is not recoverable from the code, and a
-couple of the rules exist because of things that went wrong on other extensions.
+The fork releases one `Runzelee.mcu-ai-debug` extension through `.github/workflows/package.yml`. Open VSX publication is automatic; VS Code Marketplace publication is manual. The upstream proxy listing is not published by this fork.
 
-Driver script: `scripts/prepare-release.js`. Packaging: `scripts/package-extensions.sh`.
+## Prepare a release
 
----
+1. Set `VERSION` in `scripts/sync-versions.js`, run `npm run version:sync`, and align the lockfiles.
+2. Update the current release entry in `packages/mcu-debug/CHANGELOG.md`. `node scripts/release-notes.js` prints that entry without inherited or unpublished development history.
+3. Run `npm test`, `npm run test:rust`, `npm run lint:rust`, `npm run typecheck --workspace=cockpit-webview`, and `npm run check:shared-package`.
+4. Run `npm run package:local` to verify the current-platform VSIX. This rebuilds the native helper and validates the packaged CLI, Watch, Cockpit, codicons, support scripts and firmware skill.
+5. Commit and push the final source to `main`, then push an annotated `v<version>` tag pointing to that commit. Check for an inherited upstream tag with the same name before creating a fork tag; keep its local provenance if it must be renamed. Never overwrite an existing fork release tag.
 
-## Commands
+`npm run package` is an alias for `package:local`. The old `publish`, `publish:dryrun` and `release` commands only print the fork's release instructions; they do not commit, tag, push or publish.
 
-```bash
-# Rehearse. Prints every mutating command, runs none of them.
-npm run publish:dryrun -- release-notes.md
+## GitHub Actions
 
-# Package + tag + GitHub release, no marketplace publish.
-npm run release -- release-notes.md
+A matching version tag runs source verification, builds five native helpers (Darwin ARM64/x64, Linux ARM64/x64 and Windows x64), and packages one unified `dist/mcu-ai-debug-<version>.vsix`. Downloaded helper executable permissions are restored and the final archive is checked before release.
 
-# The real thing: marketplace publish, then tag, then GitHub release.
-npm run publish -- release-notes.md
+The workflow creates a GitHub Release with the current changelog entry and that exact VSIX. Open VSX then publishes the same artifact using the repository's `OVSX_PAT` secret; a missing token fails publication. Tokens remain in GitHub Actions secrets and are never committed.
 
-# ...and Open VSX too (silently skipped for pre-releases; see below).
-npm run publish -- release-notes.md --vsx-also
-```
+Workflow dispatch builds and uploads an artifact without creating a release or publishing to Open VSX. Use it when a build-only run is needed.
 
-A release notes file is required — it becomes the body of the GitHub release.
+## Marketplace upload
 
-**Publishing to a marketplace cannot be undone.** Dry-run first. A dry run tolerates a dirty
-tree, an unpushed branch and an existing tag, reporting each as a warning, so you can rehearse
-mid-work; a real run treats all three as hard errors.
+Download the unified VSIX from the GitHub Release and upload it through the VS Code Marketplace publisher portal. The workflow has no Marketplace publishing job and does not use `VSCE_PAT`.
 
-## Tokens
+The fork does not inherit upstream's odd-minor prerelease convention. Release tags must match the extension version exactly. See the [current porting and packaging audit](../docs/upstream-porting-2026-10.md) for architecture decisions and validation limits.
 
-| Variable       | Used for                    |
-| -------------- | --------------------------- |
-| `VSCE_MD`      | VS Code Marketplace PAT      |
-| `OPEN_VSX_PAT` | Open VSX PAT (`--vsx-also`) |
+## Other checks
 
-Both are passed to the child process through the environment, never on the command line, so
-they cannot appear in `--dryrun` output or in another user's `ps`.
-
-## Version convention: odd minor = pre-release
-
-`0.1.x`, `0.3.x` are pre-releases. `0.2.x`, `0.4.x` are stable. This is forced on us: the
-Marketplace does not support semver pre-release tags, only `major.minor.patch`, and a
-pre-release and a stable release cannot share a version number.
-
-Both `package-extensions.sh` and `prepare-release.js` derive this from
-`packages/mcu-debug/package.json` independently, so `npm run package` on its own still produces
-correctly-marked VSIX files.
-
-The `--pre-release` flag is baked in at **package** time, not publish time. Packaging without it
-and then publishing produces a *stable* release no matter what the version number says.
-
-Open VSX has no pre-release channel, so `--vsx-also` is ignored for pre-releases rather than
-publishing a pre-release as though it were stable.
-
-**GitHub releases are deliberately not marked as pre-releases**, even when the Marketplace
-publish is. GitHub defines `/releases/latest` as the newest *non*-prerelease release and offers
-no "latest pre-release" equivalent, so marking ours would pin Latest to the last unmarked release
-(`v0.1.11`) until an even-minor stable ships — a stale answer that looks like a correct one.
-Every release the script creates is the current build. For the occasional build that should not
-be treated that way, tick the pre-release box by hand on the GitHub release page.
-
-Revisit this once there is a stable release to anchor Latest, or once we know how people
-actually consume these.
-
-## Changelog sections, and releases with nothing to say
-
-Both `packages/mcu-debug/CHANGELOG.md` and `packages/mcu-debug-proxy/CHANGELOG.md` must contain a
-section covering the version being released. The main extension's section also becomes the body
-of the GitHub release, so the release notes and the Marketplace changelog tab cannot drift apart.
-
-A missing section is a **warning in a dry run and an error in a real run** — deliberately, so the
-rehearsal still completes while the real thing stops and makes you write the entry.
-
-The proxy is usually published only to stay in step with the main extension, and a run of
-identical "no changes" sections reads worse than one heading that says so. A heading may
-therefore cover a span:
-
-```markdown
-## [v0.1.18 - v0.1.25] - 2026-09-??
-
-No changes. The version is kept in step with the main extension so that the two always install
-as a matched pair.
-```
-
-The version being released has to fall inside the range, inclusive. Both `[v0.1.18]` and
-`[v0.1.18 - v0.1.25]` satisfy the check for 0.1.18; only the second one also satisfies 0.1.19
-through 0.1.25.
-
-Extend the upper bound at release time rather than writing it far ahead: a range that already
-promises "no changes" up to a version that has not shipped is a claim nobody has checked, and
-if that release does carry a change the range has to be split anyway.
-
-## Order: proxy first, then main
-
-`prepare-release.js` publishes `mcu-debug-proxy` before `mcu-debug`. Two reasons:
-
-1. **Version pinning at install time.** The proxy is *no longer* in `extensionDependencies` — that
-   was removed in v0.1.15, because VS Code resolves dependencies on the workspace side and the
-   proxy is a UI-side extension, so the requirement could never be satisfied in a remote window and
-   MCU-Debug refused to activate there at all. The ordering still matters, for a runtime reason:
-   MCU-Debug detects the proxy by ping, warns when the two versions differ, and offers an install
-   pinned to its own version (`mcu-debug.mcu-debug-proxy@<version>`). Publish the main extension
-   first and everyone who updates is told their pair is mismatched, against a proxy version that is
-   not in the Marketplace yet.
-
-   `extensionDependencies` itself still exists and still lists the four workspace-side companions
-   (`debug-tracker-vscode`, `memory-view`, `rtos-views`, `peripheral-viewer`), so the
-   "dependency must already exist in the Marketplace" rule below continues to apply to those.
-2. **Blast radius.** A *first* publish of a new extension ID is where Marketplace verification
-   is most likely to flag something. Publishing the proxy first makes it the canary — if
-   verification objects, it objects to the proxy while the main listing is untouched.
-
-Marketplace publish also happens **before** git tagging, so a failed publish does not leave a
-tag and GitHub release pointing at a version that never shipped.
-
-We publish the exact VSIX files that `npm run package` produced and that get attached to the
-GitHub release, via `vsce publish --packagePath`. Letting `vsce` rebuild during publish would
-ship bits that nobody tested and that differ from the GitHub assets.
-
-## Bootstrapping a brand-new extension ID (one time only)
-
-Do **not** publish a new extension that is named as a dependency of another extension in the
-same release. It cannot resolve, and it puts dependency resolution and identity verification in
-the same submission.
-
-Instead:
-
-1. Publish both extensions **without the new dependency** — that is, leave the new extension out
-   of the other's `extensionDependencies`. Existing, already-published dependencies stay; only
-   the not-yet-published one is omitted.
-2. Wait for both to be accepted and resolvable in the Marketplace.
-3. *Then* add the dependency and cut a normal release of the main extension.
-
-This is once per new extension ID, not once per release.
-
-> As of this writing, `packages/mcu-debug` declares four dependencies —
-> `debug-tracker-vscode`, `memory-view`, `rtos-views`, `peripheral-viewer` — all already
-> published. `mcu-debug-proxy` is the one that has not shipped yet, so it is the only one to
-> omit during bootstrap. Do not strip the other four.
-
-## Marketplace verification
-
-First publishes get flagged for impersonation. This has happened to us: an extension was
-banned, the publishing **user account** was banned along with it, there was no conversational
-support channel, and it took over a month to resolve via Microsoft sales/IT. Assume there is no
-human in the loop and no fast appeal.
-
-What reduces the risk:
-
-- Publish under the established `mcu-debug` publisher, which has history. A brand-new publisher
-  shipping something resembling an existing name is the pattern that trips the heuristic.
-- Keep `displayName`, `description`, `icon`, `categories` and `repository` filled in on every
-  extension. A sparse listing looks like a low-effort upload to a classifier.
-- A **verified publisher** badge (DNS TXT record on a domain you control) is the strongest
-  signal available. A `github.io` subdomain does not qualify.
-
-Note there is a fork of this project on the Marketplace (`mcu-ai-debug`). Its listing resembles
-ours by construction, which means a naive similarity check could read the original as the
-impersonator. Our defenses are publisher history and chronology.
-
-## `extensionKind` and where things install
-
-`packages/mcu-debug` is `["workspace"]`; `packages/mcu-debug-proxy` is `["ui"]`. In a
-WSL/Docker/SSH setup VS Code copies only the workspace-kind extension into the remote, leaving
-the proxy on the host — which is correct, because **the host is where the probe is**, and the
-proxy has to run next to the probe. Do not "fix" this to match intuition; see the terminology
-inversion section in [AGENTS.md](../AGENTS.md).
-
-## Preconditions enforced by the script
-
-- Run from the repo root.
-- Release notes file exists and is non-empty.
-- `npm run build` succeeds. Build runs **before** the clean-tree check on purpose: `build` runs
-  `version:sync`, so building first catches uncommitted version churn.
-- Working tree clean, local branch in sync with origin.
-- `mcu-debug` and `mcu-debug-proxy` versions match.
-- Both changelogs have a section covering `v<version>` — a single heading or a range that
-  contains it.
-- Tag `v<version>` does not already exist locally or on origin.
-- Both expected VSIX files exist in `dist/` after packaging.
+Rust CI runs the tests, clippy and RustSec audit on main and pull requests. Shared Package Check validates generated/shared/frontend/proxy boundaries. Build Documentation compiles changed docs or bundled skill content and uploads the site artifact; the fork has no GitHub Pages deployment configured.

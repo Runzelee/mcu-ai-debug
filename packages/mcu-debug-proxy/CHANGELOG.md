@@ -9,6 +9,10 @@ functional change on this side — when in doubt, the detail for a given version
 extension's
 [changelog](https://github.com/mcu-debug/mcu-debug/blob/main/packages/mcu-debug/CHANGELOG.md).
 
+## [v0.1.5] - 2026-10-02
+
+- Align the development runtime with the MCU AI Debug fork. The fork release does not publish the upstream-owned proxy listing.
+
 ## [Unreleased]
 
 ## [v0.1.18] - 2026-09-??

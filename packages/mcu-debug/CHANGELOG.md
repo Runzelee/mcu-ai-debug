@@ -1,9 +1,84 @@
 # Change Log
 
-> **Pre-release:** there is no release version yet. Install via the dropdown beside **Install**
-> and pick *Install Pre-Release Version*; see the README for why the plain button complains.
+## 0.1.5 - 2026-10-02
+
+- Make mcu-ai-debug CLI and Cockpit share F5 sessions by default, with independent mode and per-window/session selection.
+- Add CLI-only Start/Stop human coordination; keep legacy MCP deprecated and disabled by default.
+- Add passive RTT/UART JSON Live Watch, typed snapshots, JSONL/CSV recording and independent graphs; combine both Watch views in one always-available sidebar.
+- Implement Add UART with host/device selection and baud rate, share its connection with CLI/manual commands, and add a Clear Terminal toolbar action.
+- Reserve dropdown arrow space and truncate long configuration names with a full-name tooltip.
+- Add cached GDB panel reads and explicitly requested watch mutations, editor/batch controls, English empty-state firmware prompt and SVG graph UI.
+- Improve C++ namespace symbol discovery for modm and lower console display batching to 50 ms.
+- Port upstream fixes for running-target Pause, nested substitutions, CLI config matching and multiple independent socket clients.
+- Add local/unified package entry points and runtime-content validation; repair clean CI assets, helper permissions and release identity handling. Publish Open VSX automatically from the verified release VSIX; leave Marketplace uploads manual.
+- Rewrite README and record the 2026-10 upstream review and release audit.
+
+### Historical local development notes (unpublished 0.1.18-0.1.27)
+
+## 0.1.27
+
+- Restore previously separated GDB and RTT views to one sidebar, with GDB above RTT and both available before debugging.
+- Replace duplicate RTT guidance and copy buttons with one inline copy link in the empty message.
+- Shorten the English firmware prompt to JSON Lines format and one RTT usage sentence.
+
+## 0.1.26
+
+- Fix DWARF traversal skipping C++ namespace globals in modm ELFs; deduplicate repeated global declarations.
+
+- Document modm Cortex-M/SCons configuration, C++ live expressions, shared CLI sessions and official modm:rtt integration.
+- Show RTT guidance and its inline prompt button only while the variable tree is empty; keep copying available in the title toolbar.
+- Add an English Copy Firmware Prompt button and command to RTT Live Watch, with JSON Lines and non-blocking SEGGER_RTT_Write instructions for C/C++ and modm projects.
+
+## 0.1.25
+
+- Add RTT Live Watch below GDB Live Watch, with read-only JSON variable trees isolated by session and RTT channel.
+- Add independent real-time graphs, typed JSON snapshots and streamed JSONL/CSV recording from the existing RTT connection.
+- Replace graph toolbar emoji with themed SVG icons; improve status, keyboard focus, legends, light theme and narrow layouts.
+- Handle partial UTF-8 records, nested arrays/objects, schema changes and bounded malformed input without extra polling.
+
+## 0.1.24
+
+- Reduce terminal display batching from 500 ms to 50 ms for more responsive RTT, UART and GDB output.
+- Document existing Live GDB as the default for on-demand variable and memory reads without changing Live Watch subscriptions.
+
+## 0.1.23
+
+- Use English throughout the Cockpit UI, including session mode labels, tooltips, accessibility text and the waiting status.
+
+## 0.1.22
+
+- Add visible Cockpit session mode selection; default to automatically sharing the VS Code/F5 GDB and RTT streams.
+- Replace CLI manual recording with a human Start -> CLI GDB/RTT -> user Stop interaction, with gated input and end notifications.
+- Decouple CLI manual completely from MCP and Live Watch. Keep legacy MCP deprecated and disabled by default.
+
+
+## 0.1.21
+
+- Introduce MCU AI Debug CLI (`mcu-ai-debug`) with global session discovery and explicit ID selection across VS Code windows.
+- Add F5 session attachment sharing its primary GDB and existing RTT/UART streams; preserve independent Cockpit/TUI sessions and expose a mode setting.
+- Expose cached Live Watch panel reads and user-requested additions/removals without implicit subscriptions.
+- Share the legacy manual Start / Stop Recording workflow with CLI; add human start/stop confirmation commands and bounded cleanup.
+- Keep upstream GDB/RTT command mapping, old executable alias, and standalone session lifecycle.
+
 
 ## [Unreleased]
+
+## [v0.1.20] - 2026-10-02
+
+- Resolve VS Code command variables (including CMake ELF target paths) before
+  starting AI Cockpit, and support the legacy `workspaceRoot` alias.
+- Keep cached launch configurations unchanged and normalize paths once per load,
+  preventing repeated launches from accumulating working-directory prefixes.
+- Reject unresolved CLI executable/working-directory variables before starting GDB
+  and remove the synthetic test warning from configuration loading.
+
+## [v0.1.19] - 2026-10-02
+
+- Fix extension startup after CLI integration: legacy MCP lifecycle and configuration
+  methods now belong to `MCUDebugExtension`, allowing debug configuration providers
+  and commands to register when legacy MCP is disabled.
+- Restore Live Watch selection, recording, snapshot and graph command handlers
+  and imports omitted during the CLI merge.
 
 ## [v0.1.18] - 2026-09-??
 

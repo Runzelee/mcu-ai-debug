@@ -10,9 +10,46 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  verify:
+    name: Verify fork sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/mdbg
+      - run: npm ci
+      - run: node scripts/sync-versions.js --check
+      - name: Verify release tag matches extension version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          expected_tag="v$(node -p "require('./packages/mcu-debug/package.json').version")"
+          if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match extension version $expected_tag"
+            exit 1
+          fi
+
+      - run: node scripts/release-notes.js > /dev/null
+      - run: npm run test:rust
+      - run: npm run lint:rust
+      - run: npm test
+      - run: npm run typecheck --workspace=cockpit-webview
+      - run: npm run check:shared-package
+
   build-binaries:
     name: Build Rust Binaries
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -23,24 +60,29 @@ jobs:
             platform: darwin
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/mdbg
+          shared-key: release-${{ matrix.platform }}
+
       - name: Install Cross-compilation tools (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo install cross --git https://github.com/cross-rs/cross.git
+          cargo install cross --git https://github.com/cross-rs/cross.git --locked
 
       - name: Build Binaries (Linux & Windows via Cross)
         if: matrix.os == 'ubuntu-latest'
@@ -68,6 +110,7 @@ jobs:
         with:
           name: binaries-${{ matrix.platform }}
           path: packages/mcu-debug/bin/
+          if-no-files-found: error
 
   package:
     name: Package VSIX
@@ -76,26 +119,17 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: 'npm'
 
       - name: Install dependencies
         run: |
-          npm install
-
-      - name: Verify release tag matches extension version
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          expected_tag="v$(node -p "require('./packages/mcu-debug/package.json').version")"
-          if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match extension version $expected_tag"
-            exit 1
-          fi
+          npm ci
 
       - name: Download All Binaries
         uses: actions/download-artifact@v4
@@ -106,51 +140,15 @@ jobs:
         run: |
           mkdir -p packages/mcu-debug/bin
 
-          echo "Downloaded artifacts structure:"
-          ls -R bin-artifacts/
+          # Artifact uploads discard Unix executable bits. Missing artifacts must fail.
+          cp -a bin-artifacts/binaries-linux-windows/. packages/mcu-debug/bin/
+          cp -a bin-artifacts/binaries-darwin/. packages/mcu-debug/bin/
+          find packages/mcu-debug/bin -type f -name mdbg -exec chmod 755 {} +
 
-          # Copy binaries from the platform-specific artifact directories back to packages/mcu-debug/bin
-          # The -a flag is used to preserve attributes and copy recursively
-          cp -a bin-artifacts/binaries-linux-windows/. packages/mcu-debug/bin/ || true
-          cp -a bin-artifacts/binaries-darwin/. packages/mcu-debug/bin/ || true
-
-          echo "Final consolidated binary structure:"
-          ls -R packages/mcu-debug/bin/
-
-      - name: Build and Package
-        run: |
-          mkdir -p dist
-          cd packages/mcu-debug
-          version="$(node -p "require('./package.json').version")"
-          npx vsce package --no-dependencies --out "../../dist/mcu-ai-debug-${version}.vsix"
+      - name: Build, Package and Verify Unified VSIX
+        run: npm run package:unified
         env:
           CI: true
-          SKIP_RUST_BUILD: true
-
-      - name: Verify Unified VSIX
-        shell: bash
-        run: |
-          shopt -s nullglob
-          vsix_files=(dist/*.vsix)
-          if [[ ${#vsix_files[@]} -ne 1 ]]; then
-            echo "::error::Expected exactly one VSIX in dist/, found ${#vsix_files[@]}"
-            exit 1
-          fi
-
-          entries="$(unzip -Z1 "${vsix_files[0]}")"
-          required_binaries=(
-            extension/bin/darwin-arm64/mdbg
-            extension/bin/darwin-x64/mdbg
-            extension/bin/linux-arm64/mdbg
-            extension/bin/linux-x64/mdbg
-            extension/bin/win32-x64/mdbg.exe
-          )
-          for binary in "${required_binaries[@]}"; do
-            if ! grep -Fxq "$binary" <<< "$entries"; then
-              echo "::error::Unified VSIX is missing $binary"
-              exit 1
-            fi
-          done
 
       - name: Upload VSIX Artifact
         uses: actions/upload-artifact@v4
@@ -160,52 +158,22 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Prepare Release Notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/release-notes.js > dist/release-notes.md
+
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: MCU AI Debug ${{ github.ref_name }}
+          body_path: dist/release-notes.md
           files: |
             dist/*.vsix
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  publish-vscode-marketplace:
-    name: Publish to VS Code Marketplace
-    needs: package
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Download VSIX Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: mcu-ai-debug-vsix
-          path: dist
-
-      - name: Publish Exact VSIX
-        shell: bash
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: |
-          if [[ -z "$VSCE_PAT" ]]; then
-            echo "::notice::Repository secret VSCE_PAT is not configured; skipping VS Code Marketplace publishing"
-            exit 0
-          fi
-          shopt -s nullglob
-          vsix_files=(dist/*.vsix)
-          if [[ ${#vsix_files[@]} -ne 1 ]]; then
-            echo "::error::Expected exactly one downloaded VSIX, found ${#vsix_files[@]}"
-            exit 1
-          fi
-          npx --yes @vscode/vsce@3.9.2 publish --packagePath "${vsix_files[0]}"
 
   publish-open-vsx:
     name: Publish to Open VSX
@@ -216,9 +184,9 @@ jobs:
       contents: read
     steps:
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Download VSIX Artifact
         uses: actions/download-artifact@v4

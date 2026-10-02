@@ -1,5 +1,7 @@
 # Upstream CLI integration — 2026-09-26
 
+> Current feature and release policy: [2026-10-02 porting report](./upstream-porting-2026-10.md).
+
 This review supersedes the CLI deferral in [the 2026-09-12 review](./upstream-porting-2026-09.md). The fork now adopts the upstream CLI, AI Cockpit, session socket, RTT/UART routing, remote proxy support, and the `mdbg` Rust runtime from upstream `1174ec5`. The fork baseline before integration was `97b6d2b`.
 
 The upstream runtime and proxy are tightly coupled to the CLI. They were integrated as one merge instead of copying the CLI TypeScript files alone. The fork retains its `Runzelee.mcu-ai-debug` identity, dedicated Live Watch view, editor expression command, batch editing, snapshot export, local recording, and graphing. The companion proxy remains the upstream `mcu-debug.mcu-debug-proxy` extension; its version and the bundled `mdbg` version are aligned at `0.1.18`.

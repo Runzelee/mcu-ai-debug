@@ -1,4 +1,4 @@
-name: Deploy Docusaurus to GitHub Pages
+name: Build Documentation
 
 on:
   push:
@@ -13,13 +13,11 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
-# Allow only one concurrent deployment
+# Documentation is checked and archived; this fork has no GitHub Pages site.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -44,19 +42,10 @@ jobs:
         working-directory: apps/docs
         run: npm run build
 
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Upload documentation artifact
+        uses: actions/upload-artifact@v4
         with:
+          name: mcu-ai-debug-docs
           path: apps/docs/build
-
-  deploy:
-    name: Deploy
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          if-no-files-found: error
+          retention-days: 7
