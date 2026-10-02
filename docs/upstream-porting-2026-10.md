@@ -85,11 +85,11 @@ The proxy code remains available for development, but the fork does not publish 
 | Root `package` required macOS, packaged two extensions and pushed an artifacts repository. | `package`/`package:local` now build one current-platform fork VSIX without network publication. `package:unified` uses five prebuilt helpers and creates one release VSIX. |
 | Manual local packaging could omit the platform helper because dev builds produce unqualified `bin/mdbg`. | Local entry point rebuilds and copies the helper into the correct platform directory before platform-scoped VSIX packaging. |
 | Clean prepublish did not copy codicons. | `build-all` copies codicon CSS/font and package verification requires them. |
-| Cockpit build ran an extra `npm install` after root dependency installation. | Use the existing npm workspace build under the root lockfile. |
+| npm skips build tools in the Cockpit workspace nested inside the extension on clean installs. | Keep Cockpit as an independent package: root `postinstall` runs its locked `npm ci`, then builds it. Use `npm run typecheck:cockpit` for its checks. |
 | CI silently tolerated missing downloaded artifacts. | Remove `cp ... || true`; artifact upload fails if files are absent. |
 | Artifact transfers discard Unix executable bits. | Restore permissions after consolidation and check them inside the final ZIP. [GitHub artifact documentation](https://github.com/actions/upload-artifact#permission-loss). |
 | CI only checked five binary filenames. | Shared validator checks manifest identity/version, always-visible Watch views, MCP default, helper permissions/header/count and every required CLI/Cockpit/Watch/support/font/skill runtime file. |
-| Fork unit-test glob could be passed literally by the shell. | Supported top-level test entry point; release gate runs unit tests and shared/frontend/proxy type checks. |
+| Fork unit tests depended on untracked generated shared JavaScript and commit metadata. | `pretest:unit` generates both on clean checkouts; release gate runs unit tests and shared/frontend/proxy type checks. |
 | Two Rust tests expected an untracked local ELF/ARM objdump setup. | Mark only those fixture tests explicitly ignored; default suite is runnable on a clean CI checkout. Their opt-in invocation is documented. |
 | Windows PowerShell helper script named the deleted `mcu-debug-helper` crate. | Delegate to the current native Node/Rust wrapper for `packages/mdbg`. |
 | Old local release script used upstream asset names/publisher/token conventions. | Redirect release/publish commands to the fork's Actions instructions; they perform no tagging, pushing or publication. |
@@ -109,7 +109,7 @@ Final validation results for this working-tree release are recorded below. Exist
 - `npm run package:local`: passed; produced the **Linux x64 0.1.5 VSIX**. Native helper reports 0.1.5 and all required packaged runtime files passed validation. Negative package fixtures were rejected for missing AI CLI/font, missing executable permissions and wrong ELF architecture.
 - Final packaged 0.1.5 two-window mock-DAP/RTT/UART-bridge smoke passed, including session selection, shared GDB/RTT/UART routing, UART writes gated by manual Start/Stop, panel mutation authorization, capture and detach behavior. Real isolated VS Code UI passed for before-debug sidebar order, empty-state copying, mixed RTT/UART graphs, graph controls, actual Clear Terminal clicks and light/dark/narrow layouts.
 - Packaged helper discovered modm namespace globals (`app::pb8_debug`, `SystemCoreClock`) and `_SEGGER_RTT`. The installed 0.1.5 activation/wrapper smoke passed.
-- All four workflows passed **actionlint 1.7.12**; YAML parsing, `npm ci --ignore-scripts --dry-run`, local README link checks, version synchronization and `git diff --check` passed.
+- All four workflows passed **actionlint 1.7.12**; YAML parsing, clean `npm ci` with the Cockpit install/build, local README link checks, version synchronization and `git diff --check` passed.
 - Five-platform GitHub Actions execution, Marketplace/Open VSX publication and native macOS/Windows execution have not been run in this local review.
 - UART validation used the serial TCP bridge, not a physical UART device. New pause/substitution/socket changes have no MCU hardware run in this pass; mock and pure-code checks are identified separately.
 

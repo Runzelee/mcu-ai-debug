@@ -6,7 +6,7 @@ The fork releases one `Runzelee.mcu-ai-debug` extension through `.github/workflo
 
 1. Set `VERSION` in `scripts/sync-versions.js`, run `npm run version:sync`, and align the lockfiles.
 2. Update the current release entry in `packages/mcu-debug/CHANGELOG.md`. `node scripts/release-notes.js` prints that entry without inherited or unpublished development history.
-3. Run `npm test`, `npm run test:rust`, `npm run lint:rust`, `npm run typecheck --workspace=cockpit-webview`, and `npm run check:shared-package`.
+3. Run `npm test`, `npm run test:rust`, `npm run lint:rust`, `npm run typecheck:cockpit`, and `npm run check:shared-package`.
 4. Run `npm run package:local` to verify the current-platform VSIX. This rebuilds the native helper and validates the packaged CLI, Watch, Cockpit, codicons, support scripts and firmware skill.
 5. Commit and push the final source to `main`, then push an annotated `v<version>` tag pointing to that commit. Check for an inherited upstream tag with the same name before creating a fork tag; keep its local provenance if it must be renamed. Never overwrite an existing fork release tag.
 

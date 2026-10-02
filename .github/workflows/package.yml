@@ -44,7 +44,7 @@ jobs:
       - run: npm run test:rust
       - run: npm run lint:rust
       - run: npm test
-      - run: npm run typecheck --workspace=cockpit-webview
+      - run: npm run typecheck:cockpit
       - run: npm run check:shared-package
 
   build-binaries:

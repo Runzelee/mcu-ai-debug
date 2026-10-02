@@ -6,7 +6,7 @@ Svelte 5 + Vite project. Produces a single `resources/cockpit/index.html` for th
 
 ```sh
 cd packages/mcu-debug/src/webviews/cockpit
-npm install
+npm ci --workspaces=false
 ```
 
 > **Note:** If you change `packages/shared/src/cockpit-protocol.ts`, rebuild the shared

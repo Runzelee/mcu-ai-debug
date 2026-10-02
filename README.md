@@ -36,10 +36,6 @@ Use **Select Debug Session** in the Cockpit or `--session` in the CLI when sever
 
 For independent CLI debugging, use `mcu-ai-debug debug -c "Your launch configuration"`. See the [bundled AI skill](packages/mcu-debug/support/skills/mcu-ai-debug-fw/SKILL.md) for the existing GDB/RTT/UART commands and Live GDB reads while the target is running.
 
-### Install the Agent Skill
-
-> Find `mcu-ai-debug-fw` in the installed `Runzelee.mcu-ai-debug` VS Code extension under `support/skills/`, install it for your agent harness, and verify that it is discoverable.
-
 ### Manual Human Interaction
 
 The fork's `manual` command opens a Start/Stop interaction in the VS Code window that owns the selected session:
