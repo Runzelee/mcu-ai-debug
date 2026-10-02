@@ -1,3 +1,6 @@
+import { sessionTelemetry } from '../common/session-telemetry';
+import { uartDeviceLabel } from "../common/uart-config";
+import { StreamSink } from '../common/send-to-stream';
 // Copyright (c) 2026 MCU-Debug Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +18,6 @@
 
 import * as fs from "fs";
 import * as net from "net";
-import * as path from "path";
 import { SerialParams } from "@mcu-debug/shared/serial-helper/SerialParams";
 import { TerminalInputMode } from "../adapter/servers/common";
 import { EventEmitter } from "stream";
@@ -27,6 +29,29 @@ import type { TabKind } from "@mcu-debug/shared";
 import { AnsiHelpers } from "../common/ansi-helpers";
 
 export class SerialPortView extends ManagedTab implements ISerialPortView {
+    private static readonly views = new Set<SerialPortView>();
+    private static readonly sessionOwners = new Map<string, string>();
+    private readonly owners = new Set<string>();
+    private sourceHost?: { host: string; hostName: string };
+    private streamPrefix: string;
+    public setSourceHost(host: string, hostName: string): void { this.sourceHost = { host, hostName }; }
+    public addSessionOwner(owner: string): void { this.owners.add(owner); }
+    public static bindSession(sessionId: string, owner: string): void { this.sessionOwners.set(owner, sessionId); }
+    public static unbindSession(sessionId: string): void {
+        for (const [owner, id] of this.sessionOwners) if (id === sessionId) {
+            this.sessionOwners.delete(owner);
+            for (const view of this.views) view.owners.delete(owner);
+        }
+    }
+    private prefix(): string { return this.streamPrefix; }
+    public static sinksForSession(sessionId: string): StreamSink[] {
+        return [...this.views].filter(view => [...view.owners].some(owner => this.sessionOwners.get(owner) === sessionId))
+            .map(view => ({ prefix: view.prefix(), write: text => {
+                if (!view.socket || view.socket.destroyed) return false;
+                view.onUserInput(text);
+                return true;
+            } }));
+    }
     public readonly emitter = new EventEmitter();
     private socket: net.Socket | null = null;
     private logFileStream: fs.WriteStream | null = null;
@@ -34,8 +59,8 @@ export class SerialPortView extends ManagedTab implements ISerialPortView {
     readonly direction = "both";
 
     static createOrGetTab(device: string, serialConfig: SerialParams, doClear: boolean = false, tcpPort: number = 0): SerialPortView {
-        const baseName = path.basename(device);
-        const existing = CockpitPanel.instance?.findTabByLabel(baseName) as unknown as SerialPortView | null;
+        const baseName = uartDeviceLabel(device);
+        const existing = [...this.views].find(view => view.device === device && view.tcpPort === tcpPort);
         if (existing) {
             // If a tab with the same name already exists, we will reuse it for the new serial port. This allows us to preserve the terminal buffer and other state in the tab, which can be useful for debugging purposes. We will just clear the buffer and reset the options to match the new serial port configuration.
             if (doClear) {
@@ -52,13 +77,19 @@ export class SerialPortView extends ManagedTab implements ISerialPortView {
     }
 
     constructor(private device: string, public serialConfig: SerialParams, doClear: boolean = false, private tcpPort: number) {
-        const baseName = serialConfig.label || path.basename(device);
+        const baseName = serialConfig.label || uartDeviceLabel(device);
         super(
             `serial-${getUUidPrefixed('serial')}`,
             baseName,
             "Enter input for serial port " + device,
             serialConfig.input_mode === "raw" ? "raw" : "cooked",
         );
+        const base = String(baseName).replace(/^\[|\]$/g, "");
+        let prefix = base, counter = 1;
+        while ([...SerialPortView.views].some(view => view.prefix() === `[${prefix}]`)) prefix = `${base}-${counter++}`;
+        this.streamPrefix = `[${prefix}]`;
+        this.setLabel(prefix);
+        SerialPortView.views.add(this);
         if (this.tcpPort > 0) {
             this.restartSocket();
         }
@@ -85,6 +116,7 @@ export class SerialPortView extends ManagedTab implements ISerialPortView {
     onUserClose(): void {
         MCUDebugChannel.debugMessage(`Terminal for serial port ${this.device} closed`);
         this.destroySocket();
+        SerialPortView.views.delete(this);
         this.emitter.emit("close");
     }
 
@@ -114,9 +146,17 @@ export class SerialPortView extends ManagedTab implements ISerialPortView {
 
     private destroySocket() {
         if (this.socket) {
-            this.socket.destroy();
-            this.socket = null;
+            const socket = this.socket; this.socket = null;
+            for (const event of this.telemetryOwners()) sessionTelemetry.emit("source-end", { ...event, ...this.sourceHost, source: "serial", port: this.device, prefix: this.prefix() });
+            socket.destroy();
         }
+    }
+    private telemetryOwners(): { sessionId: string; sessionName?: string }[] {
+        const ids = this.sessionIds();
+        return ids.length ? ids.map(sessionId => ({ sessionId })) : [{ sessionId: this.tabId, sessionName: "UART Monitor" }];
+    }
+    private sessionIds(): string[] {
+        return [...new Set([...this.owners].flatMap(owner => { const id = SerialPortView.sessionOwners.get(owner); return id ? [id] : []; }))];
     }
 
     private destroyLogFile() {
@@ -155,24 +195,29 @@ export class SerialPortView extends ManagedTab implements ISerialPortView {
         this.destroySocket();
         // The helper will create a TCP server for this serial port and report the port number back to us. Once we have the port number, we can connect to it.
         const socket = new net.Socket();
+        this.socket = socket;
         socket.setNoDelay(true); // keystrokes to the target must not wait for Nagle to fill a segment
         socket.connect(this.tcpPort, "127.0.0.1");
         socket.on("connect", () => {
             MCUDebugChannel.debugMessage(`Connected to serial port ${this.device} at 127.0.0.1:${this.tcpPort}`);
-            this.socket = socket;
+            if (this.socket !== socket) return;
         });
         socket.on("data", (data) => {
+            if (this.socket !== socket) return;
+            for (const event of this.telemetryOwners()) sessionTelemetry.emit('data', { ...event, ...this.sourceHost, source: 'serial', port: this.device, prefix: this.prefix(), data });
             this.send(data.toString());
             if (this.logFileStream) {
                 this.logFileStream.write(data);
             }
         });
         socket.on("error", (err) => {
+            if (this.socket !== socket) return;
             MCUDebugChannel.debugMessage(`Error on serial port ${this.device} connection: ${err.message}`);
             this.destroySocket();
             this.notifyDisconnected(err.message);
         });
         socket.on("close", () => {
+            if (this.socket !== socket) return;
             MCUDebugChannel.debugMessage(`Connection to serial port ${this.device} closed`);
             this.destroySocket();
             this.notifyDisconnected("Connection closed");

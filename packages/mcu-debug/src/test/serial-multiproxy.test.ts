@@ -428,3 +428,20 @@ test("funnel stream-id space is per-connection (channel 100 on A ≠ channel 100
     // Re-fetching the same channel on A returns the same server (idempotent).
     assert.equal(connA.ensureStreamServer("127.0.0.1", "/dev/x", 100), sA);
 });
+
+test("Add UART opens the explicitly selected Windows-port host through the existing proxy manager", async (t) => {
+    const a = new FakeProxy([avail("COM10", "local USB UART")]);
+    const b = new FakeProxy([avail("COM10", "remote USB UART")]);
+    await a.listen(); await b.listen();
+    const manager = new SerialPortManager(async config => config?.ssh?.host ? sshCfg(b.port) : localCfg(a.port));
+    t.after(() => { manager.dispose(); a.close(); b.close(); });
+    await manager.prepareSerialPorts(localCfg(a.port));
+    await manager.prepareSerialPorts(sshCfg(b.port));
+    const remote = manager.getAllAvailablePorts().find(source => source.label !== 'local');
+    assert(remote);
+    const view = await manager.openSerialPortForUser({ path: 'COM10', baud_rate: 115200 } as any, remote.proxyKey);
+    assert(view);
+    assert.equal(a.opens.length, 0);
+    assert.equal(b.opens.length, 1);
+    assert.equal(b.opens[0].path, 'COM10');
+});

@@ -417,32 +417,28 @@ fn load_elf_info(path: &str, transport: &mut impl Transport, timing: bool) -> Re
         }
         stats.total_line_time += line_start.elapsed();
 
-        // Process debug info entries for symbols (functions and variables)
-        // Find first top-level entry (subprogram or variable), then iterate siblings
+        // Namespaced C++ variables may follow an earlier namespace (for example std).
+        // Walking only siblings of the first symbol skips both later scopes and their parents.
         let entries_start = Instant::now();
         let mut entries = unit.entries();
-
-        // Find first subprogram or variable (top-level entry)
-        let mut first_entry_found = false;
-        while let Some((_, entry)) = entries.next_dfs()? {
-            match entry.tag() {
-                gimli::DW_TAG_subprogram | gimli::DW_TAG_variable => {
-                    // Process this first entry
-                    stats.total_entries += 1;
-                    process_dwarf_entry(entry, &dwarf, &unit, &mut info, &canonical_unit_file_name, &mut stats)?;
-                    first_entry_found = true;
-                    break;
-                }
-                _ => {}
-            }
-        }
-
-        // Process remaining siblings if we found a first entry
-        if first_entry_found {
-            while let Some(entry) = entries.next_sibling()? {
+        let mut depth = 0isize;
+        let mut parents = Vec::new();
+        while let Some((delta_depth, entry)) = entries.next_dfs()? {
+            depth += delta_depth;
+            parents.truncate(depth as usize);
+            let in_function = parents.iter().any(|tag| {
+                matches!(
+                    *tag,
+                    gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine | gimli::DW_TAG_lexical_block
+                )
+            });
+            // Stack locals must not accidentally match an unrelated ELF global by basename.
+            // Keep the previous global/file-static scope while traversing namespaces and types.
+            if !in_function && matches!(entry.tag(), gimli::DW_TAG_subprogram | gimli::DW_TAG_variable) {
                 stats.total_entries += 1;
                 process_dwarf_entry(entry, &dwarf, &unit, &mut info, &canonical_unit_file_name, &mut stats)?;
             }
+            parents.push(entry.tag());
         }
         stats.total_entries_time += entries_start.elapsed();
     }

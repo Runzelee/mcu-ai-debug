@@ -291,6 +291,9 @@ export class GDBServerSession extends EventEmitter {
     }
 
     public writeToConsole(data: Buffer, isStdErr = false) {
+        if (!this.session.args.pvtIsCli) {
+            this.session.sendEvent(new GenericCustomEvent('ai-server-output', { message: data.toString(), isStdErr }));
+        }
         if (this.session.args.routeGdbServerOutputToDebugConsole) {
             this.session.handleMsg(isStdErr ? GdbEventNames.Stderr : GdbEventNames.Stdout, data.toString());
         }

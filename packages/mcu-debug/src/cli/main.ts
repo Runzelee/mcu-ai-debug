@@ -167,13 +167,13 @@ function isDevVersion(): boolean {
 }
 
 async function main() {
+    const { cliArgs } = await import("./cli-options");
+    const customTransport = createInitialTransports(cliArgs, cliArgs.debug ? 'debug' : 'info');
     const devVersion = isDevVersion();
     if (devVersion) {
         setDevelopmentModeEnvVars();
         process.env[CLI_DEV_ENV] = "1"; // so parked telemetry is tagged `development`
     }
-    const { cliArgs } = await import("./cli-options");
-    const customTransport = createInitialTransports(cliArgs, cliArgs.debug ? 'debug' : 'info');
     if (devVersion) {
         logger.debug("Running in development version");
     }

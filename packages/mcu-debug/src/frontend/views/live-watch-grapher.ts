@@ -14,7 +14,9 @@ export class LiveWatchGrapher {
     private ready = false;
     private pendingMessages: any[] = [];
 
-    constructor(private extensionPath: string) {}
+    constructor(private extensionPath: string, private readonly options: { viewType?: string; title?: string; emptyMessage?: string; labelForKey?: (key: string) => string } = {}) {}
+
+    public dispose(): void { this.panel?.dispose(); this.pendingMessages = []; }
 
     /**
      * Open the graph panel. Shows a QuickPick for variable selection,
@@ -23,14 +25,16 @@ export class LiveWatchGrapher {
     public async openGraph(gatherLeafExprs: () => string[]) {
         const items = gatherLeafExprs();
         if (items.length === 0) {
-            vscode.window.showInformationMessage("No valid variables to plot. Add variables to Live Watch and expand structs first.");
+            vscode.window.showInformationMessage(this.options.emptyMessage ?? "No valid variables to plot. Add variables to Live Watch and expand structs first.");
             return;
         }
 
         // Build QuickPick items with previous selections pre-checked
         const previousKeys = new Set(this.graphKeys);
-        const pickItems: vscode.QuickPickItem[] = items.map(expr => ({
-            label: expr,
+        const pickItems: (vscode.QuickPickItem & { key: string })[] = items.map(expr => ({
+            label: this.options.labelForKey?.(expr) ?? expr,
+            detail: this.options.labelForKey ? expr : undefined,
+            key: expr,
             picked: previousKeys.has(expr),
         }));
 
@@ -43,7 +47,7 @@ export class LiveWatchGrapher {
             return;
         }
 
-        this.graphKeys = selected.map(s => s.label);
+        this.graphKeys = selected.map(s => s.key);
         this.pendingMessages = [];
 
         if (this.panel) {
@@ -82,6 +86,7 @@ export class LiveWatchGrapher {
             this.panel.webview.postMessage(msg);
         } else {
             this.pendingMessages.push(msg);
+            if (this.pendingMessages.length > 2000) this.pendingMessages.shift();
         }
     }
 
@@ -105,8 +110,8 @@ export class LiveWatchGrapher {
         };
 
         this.panel = vscode.window.createWebviewPanel(
-            "mcu-debug.liveWatchGraph",
-            "Live Watch Graph",
+            this.options.viewType ?? "mcu-debug.liveWatchGraph",
+            this.options.title ?? "GDB Live Watch Graph",
             showOptions,
             viewOptions,
         );
@@ -137,6 +142,7 @@ export class LiveWatchGrapher {
             this.panel.webview.postMessage({
                 type: "configure",
                 keys: this.graphKeys,
+                labels: Object.fromEntries(this.graphKeys.map(key => [key, this.options.labelForKey?.(key) ?? key])),
             });
         }
     }

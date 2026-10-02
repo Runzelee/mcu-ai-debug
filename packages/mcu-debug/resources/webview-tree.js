@@ -1,9 +1,17 @@
 const vscode = acquireVsCodeApi();
+function copyFirmwarePrompt(event) {
+    event.stopPropagation();
+    vscode.postMessage({ type: "copyFirmwarePrompt" });
+}
 const itemMap = new Map();
 const selectedIds = new Set();
 const selectedPendingExpressions = new Set();
 let pendingExpressions = new Set();
 let batchMode = false;
+const readOnlyTree = document.body.dataset.readonly === "true";
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+}
 
 window.addEventListener("message", (event) => {
     const message = event.data;
@@ -70,18 +78,20 @@ function getItemHtml(item) {
 
 function generateItemContentHtml(item, isTopLevel) {
     if (item.id === "dummy-msg") {
-        return `<span class="dummy-msg">${item.label}</span>`;
+        const copyHint = document.body.dataset.copyFirmwarePrompt === "true"
+            ? ` <button id="copy-firmware-prompt" class="firmware-prompt-link" type="button" onclick="copyFirmwarePrompt(event)">Click to copy firmware prompt.</button>` : "";
+        return `<span class="dummy-msg">${escapeHtml(item.label)}${copyHint}</span>`;
     }
     let actionsHtml = "";
     let editValueButton = `<span class="codicon codicon-edit-sparkle" onclick="editValue(event, '${item.id}')" title="Edit Value"></span>\n`;
-    let editValueText = `<span class="value ${item.changed ? "changed" : ""}" ondblclick="startEdit(this, '${item.id}', 'value')">${item.value || ""}</span>\n`;
-    let editLabelText = `<span class="label" ondblclick="startEdit(this, '${item.id}', 'label')">${item.label}</span>\n`;
+    let editValueText = `<span class="value ${item.changed ? "changed" : ""}" ondblclick="startEdit(this, '${item.id}', 'value')">${escapeHtml(item.value || "")}</span>\n`;
+    let editLabelText = `<span class="label" ondblclick="startEdit(this, '${item.id}', 'label')">${escapeHtml(item.label)}</span>\n`;
     if (item.hasChildren || item.readonly) {
         editValueButton = "";
         if (item.readonly) {
-            editValueText = `<span class="value readonly ${item.changed ? "changed" : ""}">${item.value || ""}</span>\n`;
+            editValueText = `<span class="value readonly ${item.changed ? "changed" : ""}">${escapeHtml(item.value || "")}</span>\n`;
         } else {
-            editValueText = `<span class="value ${item.changed ? "changed" : ""}">${item.value || ""}</span>\n`;
+            editValueText = `<span class="value ${item.changed ? "changed" : ""}">${escapeHtml(item.value || "")}</span>\n`;
         }
     }
     let hexFormat = `<span class="codicon codicon-variable-group" onclick="selectFormat(event, '${item.id}')" title="Select Format"></span>\n`;
@@ -98,7 +108,7 @@ function generateItemContentHtml(item, isTopLevel) {
             </div>
         `;
     } else if (!item.hasChildren) {
-        editLabelText = `<span class="label">${item.label}</span>\n`;
+        editLabelText = `<span class="label">${escapeHtml(item.label)}</span>\n`;
         actionsHtml = `
             <div class="actions">
                 ${editValueButton}
@@ -107,7 +117,7 @@ function generateItemContentHtml(item, isTopLevel) {
         `;
     }
     if (!isTopLevel) {
-        editLabelText = `<span class="label">${item.label}</span>\n`;
+        editLabelText = `<span class="label">${escapeHtml(item.label)}</span>\n`;
         actionsHtml = `
             <div class="actions">
                 ${editValueButton}
@@ -116,13 +126,20 @@ function generateItemContentHtml(item, isTopLevel) {
         `;
     }
 
+    if (readOnlyTree) {
+        editLabelText = `<span class="label">${escapeHtml(item.label)}</span>
+`;
+        editValueText = `<span class="value readonly ${item.changed ? "changed" : ""}">${escapeHtml(item.value || "")}</span>
+`;
+        actionsHtml = "";
+    }
     const chevronClass = item.expanded ? "codicon-chevron-down" : "codicon-chevron-right";
     const checkboxHtml =
         batchMode && isTopLevel && item.id !== "dummy-msg"
             ? `<input class="batch-checkbox" type="checkbox" ${selectedIds.has(item.id) ? "checked" : ""} onclick="toggleBatchSelection(event, '${item.id}')" aria-label="Select expression">`
             : "";
-    const labelEscaped = (item.contextValue || "").replace(/"/g, "&quot;");
-    const valueEscaped = (item.value || "").replace(/"/g, "&quot;");
+    const labelEscaped = escapeHtml(item.contextValue);
+    const valueEscaped = escapeHtml(item.value);
     const editLabelWithTitle = editLabelText.replace(/(<span class="label"[^>]*>)/, `$1<span title="${labelEscaped}">`);
     const editValueWithTitle = editValueText.replace(/(<span class="value[^"]*"[^>]*>)/, `$1<span title="${valueEscaped}">`);
     return `

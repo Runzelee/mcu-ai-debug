@@ -199,7 +199,8 @@ export class LineBuffer {
     constructor(
         private source: string,
         private emit: (source: string, line: string) => void,
-        private readonly TIMEOUT_MS = 20
+        private readonly TIMEOUT_MS = 20,
+        private readonly holdJsonLines = false
     ) { }
 
     push(chunk: string): void {
@@ -223,7 +224,10 @@ export class LineBuffer {
             clearTimeout(this.timer);
             this.timer = null;
         }
-        if (this.buf.length > 0) {
+        // Structured telemetry is newline-framed even if UART chunks arrive slowly.
+        // Ordinary prompts still flush on idle; cap retained partial JSON at 64 KiB.
+        const partialJson = this.holdJsonLines && this.buf.length <= 65536 && /^(?:[\[{]|[A-Za-z_][A-Za-z0-9_.:/-]{0,127}\s*=\s*[\[{])/.test(this.buf.trimStart());
+        if (this.buf.length > 0 && !partialJson) {
             this.timer = setTimeout(() => {
                 this.timer = null;
                 if (this.buf.length > 0) {
@@ -232,6 +236,11 @@ export class LineBuffer {
                 }
             }, this.TIMEOUT_MS);
         }
+    }
+
+    clear(): void {
+        if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+        this.buf = '';
     }
 
     flush(): void {

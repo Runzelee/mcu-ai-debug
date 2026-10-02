@@ -1,7 +1,7 @@
 {
   "name": "mcu-ai-debug",
   "publisher": "Runzelee",
-  "version": "0.1.18",
+  "version": "0.1.5",
   "preview": false,
   "description": "MCU debugger with CLI AI cockpit, Live Watch graphing and recording; legacy MCP available as an opt-in.",
   "displayName": "MCU-AI-Debug",
@@ -56,6 +56,19 @@
       {
         "title": "MCU Debug: General",
         "properties": {
+          "mcu-ai-debug.cockpit.sessionMode": {
+            "type": "string",
+            "enum": [
+              "independent",
+              "current"
+            ],
+            "default": "current",
+            "enumDescriptions": [
+              "Start an independent session (existing behavior).",
+              "Automatically share this window's VS Code/F5 debug session. No second GDB or debug server."
+            ],
+            "description": "Default AI Cockpit session mode. The toolbar remembers this window's workspace choice separately. Connections stay bound to their chosen session."
+          },
           "mcu-debug.enableTelemetry": {
             "type": "boolean",
             "default": true,
@@ -375,8 +388,8 @@
           "mcu-ai-debug.enableMcp": {
             "type": "boolean",
             "default": false,
-            "description": "(Deprecated) Enable the legacy Live Watch MCP server and workspace port file. Disabled by default; use the mcu-debug CLI for AI-assisted debugging.",
-            "deprecationMessage": "Deprecated: use the mcu-debug CLI for AI-assisted debugging. This setting remains available for legacy MCP clients."
+            "description": "(Deprecated) Enable the legacy Live Watch MCP server and workspace port file. Disabled by default; use the mcu-ai-debug CLI for AI-assisted debugging.",
+            "deprecationMessage": "Deprecated: use the mcu-ai-debug CLI for AI-assisted debugging. This setting remains available for legacy MCP clients."
           },
           "mcu-ai-debug.mcpRequireManualRecording": {
             "type": "boolean",
@@ -575,6 +588,52 @@
         "category": "MCU-AI-Debug",
         "command": "mcu-ai-debug.generateMcpConfig",
         "title": "Generate MCP Configuration for AI Agents (Deprecated)"
+      },
+      {
+        "command": "mcu-ai-debug.selectSession",
+        "title": "Select Debug Session",
+        "category": "MCU AI Debug"
+      },
+      {
+        "command": "mcu-ai-debug.disconnectSession",
+        "title": "Disconnect from Shared Session",
+        "category": "MCU AI Debug"
+      },
+      {
+        "command": "mcu-ai-debug.rttWatch.saveSnapshot",
+        "category": "JSON Live Watch",
+        "title": "Save Snapshot",
+        "icon": "$(save)"
+      },
+      {
+        "command": "mcu-ai-debug.rttWatch.startRecording",
+        "category": "JSON Live Watch",
+        "title": "Start Recording",
+        "icon": "$(record)"
+      },
+      {
+        "command": "mcu-ai-debug.rttWatch.stopRecording",
+        "category": "JSON Live Watch",
+        "title": "Stop Recording",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "mcu-ai-debug.rttWatch.openGraph",
+        "category": "JSON Live Watch",
+        "title": "Open Real-Time Graph",
+        "icon": "$(graph-line)"
+      },
+      {
+        "command": "mcu-ai-debug.rttWatch.clear",
+        "category": "JSON Live Watch",
+        "title": "Clear JSON Samples",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "mcu-ai-debug.rttWatch.copyFirmwarePrompt",
+        "category": "JSON Live Watch",
+        "title": "Copy Firmware Prompt",
+        "icon": "$(copy)"
       }
     ],
     "keybindings": [
@@ -4111,6 +4170,31 @@
           "command": "mcu-ai-debug.liveWatch.toggleBatchEdit",
           "when": "view == mcu-debug.liveWatch",
           "group": "navigation"
+        },
+        {
+          "command": "mcu-ai-debug.rttWatch.saveSnapshot",
+          "when": "view == mcu-ai-debug.rttLiveWatch",
+          "group": "navigation"
+        },
+        {
+          "command": "mcu-ai-debug.rttWatch.startRecording",
+          "when": "view == mcu-ai-debug.rttLiveWatch && !mcu-ai-debug:isRttWatchRecording",
+          "group": "navigation"
+        },
+        {
+          "command": "mcu-ai-debug.rttWatch.stopRecording",
+          "when": "view == mcu-ai-debug.rttLiveWatch && mcu-ai-debug:isRttWatchRecording",
+          "group": "navigation"
+        },
+        {
+          "command": "mcu-ai-debug.rttWatch.openGraph",
+          "when": "view == mcu-ai-debug.rttLiveWatch",
+          "group": "navigation"
+        },
+        {
+          "command": "mcu-ai-debug.rttWatch.clear",
+          "when": "view == mcu-ai-debug.rttLiveWatch",
+          "group": "navigation"
         }
       ],
       "debug/variables/context": [
@@ -4149,10 +4233,18 @@
         {
           "type": "webview",
           "id": "mcu-debug.liveWatch",
-          "name": "Live Watch",
+          "name": "GDB Live Watch",
           "icon": "$(pulse)",
-          "contextualTitle": "Live Watch",
-          "when": "debugType == mcu-debug"
+          "contextualTitle": "GDB Live Watch",
+          "order": 1
+        },
+        {
+          "type": "webview",
+          "id": "mcu-ai-debug.rttLiveWatch",
+          "name": "JSON Live Watch",
+          "contextualTitle": "JSON Live Watch",
+          "icon": "$(broadcast)",
+          "order": 2
         }
       ],
       "mcu-debug-panel": [
@@ -4171,17 +4263,17 @@
     "update-commit-hash": "node scripts/commit-hash.js",
     "build:rust:dev": "node scripts/build-rust.js dev",
     "fetch-bin": "node scripts/fetch-bin.js",
-    "build-cockpit": "npm --prefix src/webviews/cockpit install && npm --prefix src/webviews/cockpit run build",
+    "build-cockpit": "npm run build --workspace=cockpit-webview",
     "compile": "npm run build:rust:dev && npm run copy-codicons && npm run build-cockpit && npm run generate-manifest && npm run update-commit-hash && npm run check-types && node esbuild.js",
     "build": "npm run build-all",
     "check-types": "tsc-strict --noEmit",
-    "test:unit": "node --import tsx --test src/test/**/*.test.ts",
+    "test:unit": "node --import tsx --test src/test/*.test.ts",
     "watch": "npm run copy-codicons && npm-run-all -p watch:*",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc-strict --noEmit --watch --project tsconfig.json",
     "vscode:prepublish": "npm run build-all",
     "build:rust:prod": "node scripts/build-rust.js prod",
-    "build-all": "npm run build:rust:prod && npm run generate-manifest && npm run update-commit-hash && npm run build-cockpit && npm run check-types && node esbuild.js --production",
+    "build-all": "npm run build:rust:prod && npm run copy-codicons && npm run generate-manifest && npm run update-commit-hash && npm run build-cockpit && npm run check-types && node esbuild.js --production",
     "package": "vsce package --no-dependencies",
     "test:integration": "node --import tsx --test src/test/**/*.integration.ts",
     "test": "npm run test:unit"

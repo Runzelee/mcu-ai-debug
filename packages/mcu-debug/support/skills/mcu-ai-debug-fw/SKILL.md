@@ -1,15 +1,52 @@
 ---
-name: mcu-debug-fw
+name: mcu-ai-debug-fw
 description: >
-  Debug embedded firmware on a microcontroller through the mcu-debug CLI — drive execution, set breakpoints,
+  Debug embedded firmware on a microcontroller through the MCU AI Debug CLI — drive execution, set breakpoints,
   inspect registers and memory, and follow live RTT/UART telemetry. Use when investigating a crash or
   HardFault, inspecting firmware state, or tracing runtime behavior on a connected hardware target.
 license: Apache-2.0
 metadata:
-  author: Haneef Mohammed (haneefdm)
+  author: Haneef Mohammed (haneefdm), Runze Lee (Runzelee)
 ---
 
-# mcu-debug Skill Template for AI Tools
+# MCU AI Debug Firmware Skill
+
+## MCU AI Debug CLI fork: session selection and panel policy
+
+The public executable in this fork is `mcu-ai-debug`, installed at `~/.mcu-debug/bin/mcu-ai-debug` (`mcu-ai-debug.cmd` on Windows). The native `mdbg` is an implementation detail.
+
+Before connecting, run `mcu-ai-debug sessions --json`. Match the user's workspace, VS Code window, configuration and session kind, then connect using `mcu-ai-debug attach --session <id>`. Never silently select among multiple matching sessions. The selected ID stays fixed until disconnected. F5 sessions share the IDE's main GDB. Closing attach stdin disconnects only this client; `exit` explicitly ends the target session.
+
+**Default inspection: use the existing Live GDB for variable and memory reads.** In an attached F5 session, prefix read commands with `+` to route them to the session's existing Live GDB connection:
+
+```text
++p buzzer_debug
++p uwTick
++x/1uw &uwTick
+```
+
+`+` is an MCU-Debug routing prefix, not GNU GDB syntax. Unprefixed commands use the main GDB; a running main GDB can reject `p` or `x` even while Live GDB reads succeed. Keep execution control (`continue`, stepping, breakpoints) on the main GDB. Stack frames, locals and CPU registers generally require a stopped target and the main GDB's current context.
+
+Use targeted, on-demand reads. Do not spawn another GDB, enable Live Watch, or change its configuration just to inspect a variable. Reusing the existing Live GDB backend does not add panel expressions or subscriptions, although reads share its connection and probe bandwidth. Do not expand the panel, alter its sampling rate, or start recording as a substitute for a direct read.
+
+If Live GDB is unavailable or a read fails, use existing RTT telemetry where it contains the requested value. Use ordinary main-GDB reads when the target is already paused. Do not automatically interrupt a running target or conclude that every GDB read requires a halt; halting must be authorized by the task and permitted by the target restrictions.
+
+`!!livewatch read` returns already cached panel values with `sampledAt`. Treat these as the panel's last sample, not a fresh read. The panel must belong to this F5 session; a different session's panel must not be used.
+
+**Only after an explicit user request** may you mutate the panel:
+
+```text
+!!livewatch add {"expression":"buzzer_debug","userRequested":true}
+!!livewatch remove {"expression":"buzzer_debug","userRequested":true}
+```
+
+`userRequested` is your declaration of the user's instruction, not an authorization to invent one. Never set it automatically. Existing panel subscriptions remain unchanged by ordinary reads.
+
+**Manual human loop is CLI-only; never enable MCP or use Live Watch for it.** Prefer `mcu-ai-debug manual --session <id>`: the owning VS Code window asks Start, stdin is gated until approval, then the agent uses normal GDB commands/RTT and receives the user's Stop event before the CLI disconnects. Do not send more commands after `USER_STOPPED`, cancellation, or session end. Start does not override never-halt or other target restrictions.
+
+For an existing persistent attach connection, run `mcu-ai-debug manual start --session <id>` and wait for `USER_CONFIRMED`; the Stop UI opens immediately. Continue using that CLI's GDB/RTT/UART. Observe `manual-state` end notifications, or use `mcu-ai-debug manual wait --session <id>` / `manual status`. `manual stop` waits for the user's Stop; it does not stop the MCU. Successful approval/Stop exits with 0, cancellation with 2, errors with 1. `!!manual start|wait|status|stop` is available on the attach stream. Manual does not read, subscribe to, or record panel values. `manual record` and `!!livewatch record-manual` are unsupported. MCP remains deprecated/off by default. Standalone CLI sessions outside VS Code have no UI host.
+
+The single-panel-per-window limitation of existing Live Watch remains; multiple F5 sessions can still be attached for GDB/RTT/UART. Session discovery is local to the host machine.
 
 ## 🧩 System Profile & Capabilities
 You are an expert embedded firmware debugging agent capable of interacting natively with microcontrollers via the `mcu-debug` CLI tool. You can control execution, set hardware breakpoints, evaluate registers, and process real-time RTT/Serial telemetry streams simultaneously.
@@ -21,11 +58,11 @@ You are an expert embedded firmware debugging agent capable of interacting nativ
 ### 1. The Execution State Rule
 * **CRITICAL:** Track the most recent status-change notification — a JSON line with `"source":"DA"` and a `"status"` field. You do not need to parse every line of the stream; RTT/UART telemetry can be skimmed or ignored while you are waiting on state.
 * **YOU MAY SEND COMMANDS WHILE RUNNING.** You are not required to halt the target before typing. Every command is delivered to GDB whatever the state, and **GDB is the authority** on what is legal right now.
-* **WHAT NEEDS A HALTED CORE:** anything that touches the *target* — reading or writing memory and registers, local variables, expressions that dereference target memory, thread state, and setting or clearing breakpoints (which means writing to memory or to hardware breakpoint registers).
-* **WHAT WORKS WHILE RUNNING:** anything GDB can answer from its own bookkeeping without going to the target — `info breakpoints` is the canonical example.
+* **READ ROUTING:** default to `+p` / `+x` for globals and memory on the existing Live GDB. Main-GDB reads in a running thread context may be rejected; stack frames, locals and CPU registers generally need a paused target.
+* **WHAT WORKS WHILE RUNNING:** existing Live GDB reads and RTT telemetry, where supported by the target/server; main-GDB bookkeeping such as `info breakpoints` can also work.
 * **A REJECTION IS FREE.** If you guess wrong, GDB returns an error and *nothing else happens* — the session is not disturbed, the target keeps running, no state is corrupted. One wasted round trip is the entire cost. Prefer trying over halting the target on speculation.
-* **TO INSPECT TARGET STATE:** send `!!SIGINT` and wait for `"status":"paused"`, then read what you need.
-* **ALWAYS SAFE:** `status`, `!!SIGINT`, `!!NOTE:` and `!!send` are safe in any state, as is any conversation between AI and humans. `!!send` writes to the target's UART/RTT, not to its debug state, so it does not need — and does not want — a halted core: firmware waiting at a prompt is by definition running.
+* **TO INSPECT TARGET STATE:** try the existing Live GDB or RTT first. If inspection requires halting and the task authorizes it, send `!!SIGINT`, wait for `"status":"paused"`, then use the main GDB.
+* **META-COMMANDS:** `status`, `!!NOTE:` and `!!send` do not require a paused target. `!!send` writes to the firmware's UART/RTT and must stay within the requested task. `!!SIGINT` halts the target and must respect never-halt restrictions and the task's authorization.
 * **SINGLE CORE:** The cli-mode does not support debugging more than one core at a time. You can have a multi-core device but you can launch/attach to a single core (use `numberOfProcessors` and `targetProcessor` in debug configuration)
 
 Do not maintain your own allow-list of "commands that work while running". The real boundary
@@ -60,24 +97,14 @@ Excerpt of a session run (from `grep '"status":' .mcu-debug/cli.log`). The same 
 If you started the session yourself with `--no-tui` (Step 1a), the same status text is also written to **stderr** as a plain line (`status: running`), so you can track state without parsing JSON. The JSON form is only on the socket/pipe and the log file.
 
 ### 2. Interrupting a Running Target
-* If you need to inspect or halt a target that is currently running, you **MUST NOT** send a standard Ctrl+C character down stdin.
+* When halting is authorized and necessary, **do not send** a standard Ctrl+C character down stdin.
 * Instead, send the explicit meta-command text `!!SIGINT\n` to gracefully drop the proxy server into a command-ready state.
 
-### 3. This Skill Requires a Haltable Target
+### 3. Respect Never-Halt Restrictions
 
-Everything above depends on being able to stop the core. If the debug configuration disables
-halting — most commonly `"set remote interrupt-on-connect off"` in `preLaunchCommands` — **stop
-and tell the user.** Do not proceed, and do not try to force the target to halt.
+A never-halt restriction forbids interruption, stepping, resets and other actions that stop the core. It does not forbid supported read-only Live GDB or RTT inspection. `set remote interrupt-on-connect off` prevents interruption when connecting; that setting alone is not a declaration that all inspection is impossible.
 
-* The CLI cannot drive a never-halt session today. `liveWatch` (the non-stop inspection channel)
-  is explicitly disabled in CLI mode, so there is no way to read state without halting.
-* Waiting for `"status":"paused"` on such a target will wait forever.
-* Forcing a halt may be **physically unsafe**. This configuration is used for motor control and
-  similar real-time systems where stopping the core mid-operation can damage hardware or whatever
-  it is driving. This is not a case where a workaround is better than stopping.
-
-Say plainly that the configuration is outside this skill's scope and let the user decide how to
-proceed.
+F5 attachment can reuse an already available Live GDB. Independent CLI mode currently disables `liveWatch`, so do not assume the `+` read channel is available there. If neither Live GDB nor RTT can provide a value without halting, report that limitation and do not force a halt or wait indefinitely for `paused`.
 
 ---
 
@@ -121,11 +148,11 @@ AI can either start a new debug session for totally autonomous debugging (1a), o
 For Windows use the path `%USERPROFILE%\.mcu-debug\bin\mcu-debug.cmd` in all commands below
 
 ```bash
-~/.mcu-debug/bin/mcu-debug debug --no-tui --config <name-of-configuration | index> [--json <path-to-launch.json>] [--settings <path-to-settings-file>] [--log-file <path-to-log-file>]
+~/.mcu-debug/bin/mcu-ai-debug debug --no-tui --config <name-of-configuration | index> [--json <path-to-launch.json>] [--settings <path-to-settings-file>] [--log-file <path-to-log-file>]
 ```
 For `--config` you can use a full configuration name, or an index, or a glob pattern that matches **exactly one** configuration — an ambiguous glob is an error, not a silent first-match. Only configurations of `"type":"mcu-debug"` are considered. Indexing starts with 0 and does not include non mcu-debug configurations.
 
-The optional arguments default to `--json .vscode/launch.json` and `--settings .vscode/settings.json`, and an omitted `--log-file` writes to `$CWD/.mcu-debug/cli.log`, so you rarely need to pass any of them. The simplest command you can issue would be `mcu-debug debug -c 0` at the root of the workspace, since `--no-tui` is auto triggered if STDOUT is not a TTY
+The optional arguments default to `--json .vscode/launch.json` and `--settings .vscode/settings.json`, and an omitted `--log-file` writes to `$CWD/.mcu-debug/cli.log`, so you rarely need to pass any of them. The simplest command you can issue would be `mcu-ai-debug debug -c 0` at the root of the workspace, since `--no-tui` is auto triggered if STDOUT is not a TTY
 
 ##### Preferred: `--wait-for-client`
 
@@ -140,11 +167,11 @@ it from a second one:
 # Process 1 — blocks until a client connects. Run it in its own terminal, or spawn it
 # as a child process and keep its stdin open.
 cd <workspace-root>
-~/.mcu-debug/bin/mcu-debug debug --no-tui -c 0 --wait-for-client
+~/.mcu-debug/bin/mcu-ai-debug debug --no-tui -c 0 --wait-for-client
 
 # Process 2 — this is you.
 cd <workspace-root>
-~/.mcu-debug/bin/mcu-debug attach
+~/.mcu-debug/bin/mcu-ai-debug attach
 ```
 
 If you are an AI agent, spawn process 1 the way you spawn any long-running child process, holding
@@ -153,8 +180,8 @@ its stdin open, and do your work over process 2.
 **If you do background it, add `--nostdin`:**
 
 ```bash
-~/.mcu-debug/bin/mcu-debug debug --no-tui -c 0 --wait-for-client --nostdin &
-~/.mcu-debug/bin/mcu-debug attach
+~/.mcu-debug/bin/mcu-ai-debug debug --no-tui -c 0 --wait-for-client --nostdin &
+~/.mcu-debug/bin/mcu-ai-debug attach
 ```
 
 `--nostdin` tells the session never to read stdin, which is what makes backgrounding safe — a
@@ -198,23 +225,23 @@ While the logfile provides a read-only view into the debug session, connecting t
 
 There are a few other options that may be of help. For full help
 ```bash
-~/.mcu-debug/bin/mcu-debug --help
-~/.mcu-debug/bin/mcu-debug debug --help
+~/.mcu-debug/bin/mcu-ai-debug --help
+~/.mcu-debug/bin/mcu-ai-debug debug --help
 ```
 #### Step 1b: Connecting to an already started session
 
-A debug session should already be running. With or without TUI. TUI mode can help AI to interact with the user as well as GDB to form a 3-way conversation. This can also be done inside the VSCode's `MCU Debug` Panel's `AI- ockpit`. Regardless of how the session started, the rest of the procedure remains the same.
+A debug session should already be running. With or without TUI. TUI mode can help AI to interact with the user as well as GDB to form a 3-way conversation. This can also be done inside the VSCode's `MCU Debug` Panel's `AI- ockpit`. F5 attach sends commands to the existing IDE GDB; independent CLI owns a separate GDB. Select the appropriate session ID as described above.
 
-Run `attach` from the root of the workspace and it will find the session for you — it reads `.mcu-debug/socket.json` from the current directory and picks the right endpoint for the platform (`socket` on Linux/Mac, `pipe` on Windows). You do not need to parse the file yourself.
+Prefer `sessions --json` followed by `attach --session <id>`. Bare `attach` from the workspace root requires exactly one matching registered session. The project `.mcu-debug/socket.json` file is a fallback only when the global registry has no active sessions. You do not need to parse endpoint metadata yourself.
 
 ```bash
-cd <workspace-root> && ~/.mcu-debug/bin/mcu-debug attach
+cd <workspace-root> && ~/.mcu-debug/bin/mcu-ai-debug attach
 ```
 
 Resolution is relative to the current directory, so this is the one thing that can fail — if the session was started somewhere else, pass the endpoint explicitly:
 
 ```bash
-~/.mcu-debug/bin/mcu-debug attach -s <socket-or-pipe-path>
+~/.mcu-debug/bin/mcu-ai-debug attach -s <socket-or-pipe-path>
 ```
 
 Either form gives you the existing session over stdio. You can also connect to the socket/pipe directly if you prefer to manage the connection yourself. When a connection is made to the socket/pipe, about 10KB of recent history is replayed to you, always starting at a whole line — you never receive a partial JSON record. This is a small recency window, not an archive: for anything older, `grep` the log file, which has the complete session with no limit.
@@ -295,10 +322,10 @@ Closing stdin does **different things depending on which process you started**, 
 
 When the session ends, any breakpoints are saved and then restored on the next session.
 
-* Closing stdin of `mcu-debug debug` (Step 1a — the process hosting the session) ends the session,
+* Closing stdin of `mcu-ai-debug debug` (Step 1a — the process hosting the session) ends the session,
   **even if you are attached over the socket**. Whoever started the session on stdin owns its
   lifetime; you are the copilot and do not inherit the controls when they leave.
-* Closing stdin of `mcu-debug attach` (Step 1b) disconnects *you*. What happens next depends on how
+* Closing stdin of `mcu-ai-debug attach` (Step 1b) disconnects *you*. What happens next depends on how
   the session was started:
   * A session started by a human in a terminal keeps running — their stdin is still flying it, and
     you or someone else can attach again.
@@ -352,18 +379,15 @@ SEGGER_RTT_printf(0, "state=%d at %u us\n", state, timer_us());
 
 Then from GDB: `continue` and observe the RTT stream.
 
-### Use memory reads for state inspection without halting
+### Use Live GDB reads for state inspection without halting
 
-```gdb
-# Read a global variable without halting
-x/1uw &g_error_count
+```text
+# Route a targeted global/memory read to the existing Live GDB
++p g_error_count
++x/1uw &g_error_count
 ```
 
-:::note
-Most gdb-servers do not allow reading memory or other inspection, as they don't support `non-stop` mode. If your gdb server supports `non-stop` mode please enable it using `postLaunchCommands` or equivalent.
-:::
-
-TBD: Combined with Live Watch, this gives you continuous visibility without disturbing execution. We are trying to implement this at least with some gdb-servers
+Check the actual command response. Availability depends on the current session and target/server. Use the default-inspection fallback above when the Live GDB channel is unavailable; do not change debug modes or add Live Watch subscriptions automatically.
 
 ## Advanced: Autonomous Investigation Script
 

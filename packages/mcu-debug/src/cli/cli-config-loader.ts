@@ -9,6 +9,7 @@ import { McuDebugConfigurationProviderBase } from "../common/config-provider";
 import { processVarSubstitution } from "../adapter/servers/common";
 import { getHostAdapter } from "../common/host-adapter";
 import { CustomTransport } from "../common/logger";
+import { minimatch } from "minimatch";
 
 export interface ConfigLoaderArgs {
     json?: string;           // JSON file if any
@@ -47,6 +48,9 @@ export class CLIConfigLoader {
                     return undefined;
                 }
             }
+            // Resolution normalizes paths and removes CLI-only unsupported features.
+            // Keep the caller's launch.json/cache pristine for the next launch.
+            selectedConfig = structuredClone(selectedConfig);
             const customTransport = CustomTransport.getInstance();
             if (!this.forVscode && selectedConfig.cliOptions?.logFile && customTransport?.usingDefaultLogFile) {
                 CustomTransport.getInstance()?.replaceStream(customTransport.usingDefaultLogFile, selectedConfig.cliOptions.logFile);
@@ -57,7 +61,6 @@ export class CLIConfigLoader {
             const configMsg = `Loaded configuration "${selectedConfig.name}"` + (args.json ? ` from ${args.json}` : "") + (this.forVscode ? " for VSCode" : " for CLI");
             this.logger.info(configMsg, { source: 'DA' });
             // selectedConfig.debugFlags = undefined as any; // TODO: Remove this line after testing normal flow
-            this.logger.warn("Testing warning: This is a test warning message to demonstrate the warning display in CLI mode.");
 
             if (selectedConfig.liveWatch?.enabled) {
                 this.logger.warn("Live watch is not supported in CLI mode. Disabling live watch.");
@@ -78,7 +81,13 @@ export class CLIConfigLoader {
 
             const processedConfig = this.processVarSubstitutions(args, selectedConfig);
             const provider = new CliConfigProvider(this.logger);
-            const folder = selectedConfig.cwd || process.cwd();
+            const folder = args.builtins?.workspaceFolder || process.cwd();
+            for (const [field, value] of Object.entries({ cwd: processedConfig.cwd, executable: processedConfig.executable })) {
+                if (typeof value === "string" && /\$\{(?:command:|workspaceRoot|workspaceFolder)/.test(value)) {
+                    this.logger.error(`Unresolved variable in "${field}": ${value}. Resolve command variables in VS Code or provide a concrete path for the CLI.`);
+                    return undefined;
+                }
+            }
             try {
                 let resolvedConfig = await provider.resolveDebugConfiguration(folder, processedConfig);
                 if (resolvedConfig) {
@@ -156,8 +165,8 @@ export class CLIConfigLoader {
             }
         }
         // See if we can do a glob match, but it has to match exactly one configuration to avoid ambiguity.
-        const minimatch = require("minimatch");
-        const globMatches = configurations.filter((c: any) => minimatch(c.name, args.config));
+        const pattern = "**" + args.config.replace(/^\**/, "").replace(/\**$/, "") + "**";
+        const globMatches = configurations.filter((c: any) => minimatch(c.name, pattern, { nocase: true, nonegate: true, nocomment: true }));
         if (globMatches.length === 1) {
             selectedConfig = globMatches[0];
             this.logger.info(`Selected configuration with name "${selectedConfig.name}" from ${args.json} using glob pattern "${args.config}"`);
@@ -230,6 +239,7 @@ export class CLIConfigLoader {
         // when no VSCode is involved. For example, ${workspaceFolder} is supported but ${file} is not since there is no file context.
         builtins.userHome = (os.homedir() || "").replace(/\\/g, '/');
         builtins.workspaceFolder = (rootDir || process.cwd()).replace(/\\/g, '/');
+        builtins.workspaceRoot = builtins.workspaceFolder;
         builtins.workspaceFolderBasename = path.basename(builtins.workspaceFolder);
         builtins.cwd = (rootDir || process.cwd()).replace(/\\/g, '/');
         builtins.pathSeparator = '/'; // path.sep; We always use '/' as most gnu tools don't work with backslashes even on Windows.
@@ -260,12 +270,6 @@ export class CliConfigProvider extends McuDebugConfigurationProviderBase {
             config = (await super.resolveDebugConfiguration(folder, config)) as ConfigurationArguments;
         } catch (error) {
             this.logger.error("Error in resolveDebugConfiguration: " + (error instanceof Error ? error.message : String(error)));
-            return undefined;
-        }
-        try {
-            config = (await super.resolveDebugConfigurationWithSubstitutedVariables(folder, config)) as ConfigurationArguments;
-        } catch (error) {
-            this.logger.error("Error in resolveDebugConfigurationWithSubstitutedVariables: " + (error instanceof Error ? error.message : String(error)));
             return undefined;
         }
         if (!config) {

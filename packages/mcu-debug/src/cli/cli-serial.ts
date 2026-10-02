@@ -2,6 +2,7 @@ import { TabState } from '@mcu-debug/shared';
 import { SerialParams } from '@mcu-debug/shared/serial-helper/SerialParams';
 import * as fs from 'fs';
 import * as net from 'net';
+import { StringDecoder } from "node:string_decoder";
 import { EventEmitter } from 'node:events';
 import * as path from 'node:path';
 import { AnsiHelpers } from '../common/ansi-helpers';
@@ -15,6 +16,7 @@ export class CLISerialPortView implements ISerialPortView {
     private logFileStream: fs.WriteStream | null = null;
     private txtPrefix: string;
     private lineBuffer: LineBuffer;
+    private decoder = new StringDecoder("utf8");
     private static existingPrefixes = new Set<string>();
 
     constructor(private device: string, public serialConfig: SerialParams, doClear: boolean = false, private tcpPort: number = 0) {
@@ -44,12 +46,12 @@ export class CLISerialPortView implements ISerialPortView {
             if (this.logFileStream) {
                 this.logFileStream.write(str + "\n");
             }
-            logger.info(str, { source: "serial", isConsole: true });
-        });
+            logger.info(str, { source: "serial", port: this.device, prefix: this.txtPrefix, isConsole: true });
+        }, 20, true);
     }
 
     public getStatus(): "connected" | "not-connected" {
-        return this.socket && !this.socket.destroyed ? "connected" : "not-connected";
+        return this.socket && !this.socket.destroyed && !this.socket.connecting ? "connected" : "not-connected";
     }
 
     public getPrefix(): string {
@@ -122,9 +124,11 @@ export class CLISerialPortView implements ISerialPortView {
 
     private destroySocket() {
         if (this.socket) {
-            this.socket.destroy();
-            this.socket = null;
+            const socket = this.socket; this.socket = null;
+            socket.destroy();
         }
+        this.decoder = new StringDecoder("utf8");
+        this.lineBuffer?.clear();
     }
 
     private closeLogFile() {
@@ -158,20 +162,23 @@ export class CLISerialPortView implements ISerialPortView {
         this.destroySocket();
         // The helper will create a TCP server for this serial port and report the port number back to us. Once we have the port number, we can connect to it.
         const socket = new net.Socket();
+        this.socket = socket;
         socket.setNoDelay(true); // keystrokes to the target must not wait for Nagle to fill a segment
         socket.connect(this.tcpPort, "127.0.0.1", () => {
             getHostAdapter().debugMessage(`Connected to serial port ${this.device} at 127.0.0.1:${this.tcpPort}`);
-            this.socket = socket;
+            if (this.socket !== socket) return;
         });
         socket.on("data", (data) => {
-            this.send(data.toString());
+            if (this.socket === socket) this.send(this.decoder.write(data));
         });
         socket.on("error", (err) => {
+            if (this.socket !== socket) return;
             getHostAdapter().debugMessage(`Error on serial port ${this.device} connection: ${err.message}`);
             this.destroySocket();
             this.notifyDisconnected(err.message);
         });
         socket.on("close", () => {
+            if (this.socket !== socket) return;
             getHostAdapter().debugMessage(`Connection to serial port ${this.device} closed`);
             this.destroySocket();
             this.notifyDisconnected("Connection closed");
@@ -181,6 +188,7 @@ export class CLISerialPortView implements ISerialPortView {
     dispose() {
         this.destroySocket();
         this.closeLogFile();
-        CLISerialPortView.existingPrefixes.delete(this.txtPrefix);
+        this.lineBuffer.flush();
+        CLISerialPortView.existingPrefixes.delete(trimBrackets(this.txtPrefix));
     }
 }

@@ -24,6 +24,7 @@ export interface TreeViewProviderDelegate {
     onMoveUp?(item: TreeItem): Promise<void>;
     onMoveDown?(item: TreeItem): Promise<void>;
     onSetFormat?(item: TreeItem, format: string): Promise<void>;
+    onCopyFirmwarePrompt?(): Promise<void>;
     onSetExpanded?(item: TreeItem, expanded: boolean): Promise<void>;
 }
 
@@ -40,6 +41,7 @@ export class EditableTreeViewProvider implements vscode.WebviewViewProvider {
     constructor(
         private readonly _extensionUri: vscode.Uri,
         private readonly _delegate: TreeViewProviderDelegate,
+        private readonly options: { readOnly?: boolean; copyFirmwarePrompt?: boolean } = {},
     ) {}
 
     public async add() {
@@ -69,7 +71,11 @@ export class EditableTreeViewProvider implements vscode.WebviewViewProvider {
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
+            if (this.options.readOnly && !["getChildren", "setExpanded", "copyFirmwarePrompt"].includes(data.type)) return;
             switch (data.type) {
+                case "copyFirmwarePrompt":
+                    if (this.options.copyFirmwarePrompt) await this._delegate.onCopyFirmwarePrompt?.();
+                    break;
                 case "getChildren":
                     const children = await this._delegate.getChildren(data.element);
                     this._view?.webview.postMessage({ type: "setChildren", element: data.element, children });
@@ -191,7 +197,7 @@ export class EditableTreeViewProvider implements vscode.WebviewViewProvider {
             <link href="${styleUri}" rel="stylesheet" />
             <link href="${codiconsUri}" rel="stylesheet" />
         </head>
-        <body>
+        <body data-readonly="${Boolean(this.options.readOnly)}" data-copy-firmware-prompt="${Boolean(this.options.copyFirmwarePrompt)}">
             <section id="batch-toolbar" class="batch-toolbar" hidden>
                 <label for="batch-input">Paste expressions (one per line), then choose which to add</label>
                 <textarea id="batch-input" rows="4" placeholder="motor.speed&#10;sensors[index].value"></textarea>

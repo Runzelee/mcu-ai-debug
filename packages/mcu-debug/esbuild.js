@@ -62,11 +62,17 @@ async function main() {
         outfile: "dist/mcu-debug-cli.js",
     });
 
+    const ctxAiCli = await esbuild.context({
+        ...commonOptions,
+        entryPoints: ["src/cli/ai-main.ts"],
+        outfile: "dist/mcu-ai-debug-cli.js",
+    });
+
     if (watch) {
-        await Promise.all([ctxMain.watch(), ctxAdapter.watch(), ctxCli.watch()]);
+        await Promise.all([ctxMain.watch(), ctxAdapter.watch(), ctxCli.watch(), ctxAiCli.watch()]);
     } else {
-        await Promise.all([ctxMain.rebuild(), ctxAdapter.rebuild(), ctxCli.rebuild()]);
-        await Promise.all([ctxMain.dispose(), ctxAdapter.dispose(), ctxCli.dispose()]);
+        await Promise.all([ctxMain.rebuild(), ctxAdapter.rebuild(), ctxCli.rebuild(), ctxAiCli.rebuild()]);
+        await Promise.all([ctxMain.dispose(), ctxAdapter.dispose(), ctxCli.dispose(), ctxAiCli.dispose()]);
     }
 }
 

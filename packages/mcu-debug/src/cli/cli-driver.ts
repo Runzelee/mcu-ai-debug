@@ -1,9 +1,12 @@
+import { randomUUID } from "node:crypto";
+import { SessionRegistry, AISessionRecord } from "../common/session-registry";
+import { sendToStream } from "../common/send-to-stream";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
-import find from 'find-process';
+import find from "find-process";
 import { ConfigurationArguments, RTTConsoleDecoderOpts } from "../adapter/servers/common";
 import { CLISessionType, IDebugConfiguration, IDebugSession, IHostAdapter } from "../common/host-adapter";
 import { CustomTransport, logger } from "../common/logger";
@@ -78,6 +81,8 @@ export class CliSessionDriver {
     private socketPromise: Promise<void> = Promise.resolve(); // used to wait for socket connections
     private serverClients = new Set<net.Socket>();
     private server: net.Server | null = null;
+    private registryRecord?: AISessionRecord;
+    private readonly manualUiClients = new Set<net.Socket>();
     private socketPath: string | null = null;
     private rtts: CLIRTTTerminal[] = [];
 
@@ -132,7 +137,11 @@ export class CliSessionDriver {
             return;
         }
         this.status = state;
-        const infoMsg = `status: ${state}` + (reason ? `: Reason — ${reason}` : '');
+        if (this.registryRecord) {
+            this.registryRecord.status = state;
+            new SessionRegistry().write(this.registryRecord);
+        }
+        const infoMsg = `status: ${state}` + (reason ? `: Reason — ${reason}` : "");
         if (!this.isTTY) {
             process.stderr.write(infoMsg + os.EOL);
         }
@@ -140,7 +149,7 @@ export class CliSessionDriver {
         // JSON stream) never have to regex `infoMsg`. Only isConsole/color/skipConsole are
         // stripped before format.json(), so these survive as top-level fields on the log line.
         // `infoMsg` stays as-is for humans reading stderr/TUI — do not make it the contract.
-        logger.info(infoMsg, { source: 'DA', status: state, reason: reason ?? '', skipConsole: true });
+        logger.info(infoMsg, { source: "DA", status: state, reason: reason ?? "", skipConsole: true });
     }
 
     async startSession(cliArgs: any) {
@@ -472,6 +481,7 @@ export class CliSessionDriver {
      * nobody is flying any more.
      */
     private hasEverHadClient = false;
+    private clientSeq = 0;
 
     /**
      * Update the prompt string and redraw the input line in place.
@@ -606,47 +616,89 @@ export class CliSessionDriver {
         // cannot turn a command into an error; a genuine misspelling falls through to
         // unknowMetaCommand() below and is reported rather than acted on.
         const lower = trimmedInput.toLowerCase();
-        if (lower === 'pause' || lower === '!!sigint') {
+        if (lower.startsWith("!!manual")) {
+            const match = /^!!manual\s+(start|stop|wait|status)(?:\s+--request-id\s+([a-zA-Z0-9-]+))?$/i.exec(trimmedInput);
+            const requestId = match?.[2] ?? randomUUID();
+            const failed = (message: string) => logger.error(message, { source: "DA", command: "manual", requestId, error: "command-failed", isConsole: true });
+            const endpoint = process.env.MCU_AI_DEBUG_UI_SOCKET, ownerId = this.registryRecord?.id;
+            if (!match || !endpoint || !ownerId) {
+                failed("Use !!manual start|wait|status|stop in a VS Code-owned session. Manual does not use MCP or Live Watch.");
+                return true;
+            }
+            const action = match[1].toLowerCase();
+            const socket = net.connect(endpoint);
+            this.manualUiClients.add(socket);
+            socket.on("connect", () => socket.write(`!!manual ${action} --request-id ${requestId} --owner-id ${ownerId}\n`));
+            let pending = "", answered = false, manualId: string | undefined;
+            socket.on("data", (chunk) => {
+                pending += chunk.toString();
+                const lines = pending.split("\n"); pending = lines.pop()!;
+                for (const line of lines) {
+                    if (!line) continue;
+                    try {
+                        const info = JSON.parse(line);
+                        const response = info.requestId === requestId;
+                        const notification = action === "start" && manualId && info.event === "manual-state" && info.ownerId === ownerId && info.manualId === manualId;
+                        if (!response && !notification) continue;
+                        answered = true;
+                        const { message, level, ...meta } = info;
+                        logger.log(level ?? "info", message, meta);
+                        if (response && action === "start" && info.state === "active") manualId = info.manualId;
+                        else socket.end();
+                    } catch { }
+                }
+            });
+            socket.on("error", (error) => { answered = true; failed(String(error)); });
+            socket.on("close", () => { this.manualUiClients.delete(socket); if (!answered) failed("VS Code manual UI host disconnected"); });
+            return true;
+        }
+        if (lower.startsWith("!!livewatch")) {
+            logger.error("Independent CLI sessions have no Live Watch panel; attach to its F5 session", { source: "DA", isConsole: true });
+            return true;
+        }
+
+        if (lower === "pause" || lower === "!!sigint") {
             this.doInterrupt();
             return true;
-        } if (lower === 'reset' || lower === '!!reset') {
+        }
+        if (lower === "reset" || lower === "!!reset") {
             this.sendRequest<DebugProtocol.RestartResponse>({
-                seq: 0,          // overwritten by sendRequest
-                type: 'request', // overwritten by sendRequest
-                command: 'reset-device',
+                seq: 0, // overwritten by sendRequest
+                type: "request", // overwritten by sendRequest
+                command: "reset-device",
             }).then((response) => {
                 if (!response.success) {
                     logger.warn(`Reset request failed: ${response.message}`);
                 }
             });
             return true;
-        } else if (lower === 'status' || lower === '!!status') {
+        } else if (lower === "status" || lower === "!!status") {
             this.doStatus();
             return true;
-        } else if (lower === 'restart' || lower === '!!restart') {
+        } else if (lower === "restart" || lower === "!!restart") {
             this.doRestart(isTerminal);
             return true;
-        } else if (lower === 'exit') {
+        } else if (lower === "exit") {
             this.doExit(isTerminal);
             return true;
-        } else if (lower.startsWith('!!ai-request-clear')) {
+        } else if (lower.startsWith("!!ai-request-clear")) {
             // All we do is echo it back so the console display can pick it up and use it to trigger the AI Request UI.
             // The actual processing of the command is done in the console UI. It is an instruction to the user or a request
             // to the UI to clear/display something
-            logger.info('!!AI-REQUEST-CLEAR', { isConsole: true, source: 'AI' });
+            logger.info("!!AI-REQUEST-CLEAR", { isConsole: true, source: "AI" });
             return true;
-        } else if (lower.startsWith('!!ai-request:')) {
+        } else if (lower.startsWith("!!ai-request:")) {
             // All we do is echo it back so the console display can pick it up and use it to trigger the AI Request UI.
             // The actual processing of the command is done in the console UI. It is an instruction to the user or a request
             // to the UI to clear/display something
             // Re-emit the canonical spelling rather than what was typed: the TUI matches this
             // prefix exactly (cockpit/tui.rs), so a lower-case variant would pass through here
             // and then fail to be intercepted downstream.
-            logger.info(`!!AI-REQUEST:${trimmedInput.substring('!!AI-REQUEST:'.length)}`, { isConsole: true, source: 'AI' });
+            logger.info(`!!AI-REQUEST:${trimmedInput.substring("!!AI-REQUEST:".length)}`, { isConsole: true, source: "AI" });
             return true;
-        } else if (lower.startsWith('!!note:')) {
+        } else if (lower.startsWith("!!note:")) {
             // This is a command from the DA to the CLI to update the notes. The payload is in the format of !!NOTE:{"doc":[{...json-patch...}]}
-            const jsonStr = trimmedInput.substring('!!NOTE:'.length);
+            const jsonStr = trimmedInput.substring("!!NOTE:".length);
             this.handleNotes(jsonStr);
             return true;
         } else if (/^!!send(\s|$)/i.test(trimmedInput)) {
@@ -655,7 +707,7 @@ export class CliSessionDriver {
             // with `!!` to the AI -- so a tab silently turned a target write into a chat message.
             // Take the arguments from the raw line: trimStart() drops indentation before the
             // command, but anything after it -- trailing spaces included -- is the target's data.
-            this.doSendToStream(rawInput.trimStart().substring('!!send'.length).replace(/^\s/, ''));
+            this.doSendToStream(rawInput.trimStart().substring("!!send".length).replace(/^\s/, ""));
             return true;
         } else if (isTerminal && /^!!ai(\s|$)/i.test(trimmedInput)) {
             // A free-text message to whatever client is attached. This used to be the catch-all for
@@ -667,15 +719,15 @@ export class CliSessionDriver {
             // never has to strip our wording out of it, and the DA line is the human's
             // confirmation. Socket clients are registered as transport streams, so the first one
             // reaches them as JSON without anything further being written by hand.
-            const request = trimmedInput.substring('!!ai'.length).trim();
+            const request = trimmedInput.substring("!!ai".length).trim();
             if (!request) {
-                this.stdoutLogger.warn('Usage: !!ai <text> — sends the text to any connected AI');
+                this.stdoutLogger.warn("Usage: !!ai <text> — sends the text to any connected AI");
                 return true;
             }
-            logger.info(request, { skipConsole: true, source: 'USER-REQUEST' });
+            logger.info(request, { skipConsole: true, source: "USER-REQUEST" });
             this.stdoutLogger.info(`Sent to any connected AI: ${request}`);
             return true;
-        } else if (lower.startsWith('!!')) {
+        } else if (lower.startsWith("!!")) {
             // An unrecognised meta-command from a socket client. This is the agent's only signal
             // that it got the spelling wrong, so it is reported rather than dropped.
             this.unknowMetaCommand(trimmedInput);
@@ -839,7 +891,7 @@ export class CliSessionDriver {
                 prefix: p.getPrefix(),
                 // onUserInput() appends the terminator itself; the RTT path above adds its own.
                 write: (text: string) => {
-                    if (p.getStatus() !== 'connected') {
+                    if (p.getStatus() !== "connected") {
                         return false;
                     }
                     p.onUserInput(text);
@@ -847,53 +899,10 @@ export class CliSessionDriver {
                 },
             })),
         ];
-        const names = () => sinks.map((s) => s.prefix);
-        const fail = (msg: string, error: string, extra: object = {}) => {
-            logger.error(`!!send: ${msg}`, { source: 'DA', isConsole: true, command: 'send', error, ...extra });
-        };
-
-        // Look for the address past any extra spacing: `!!send   [port]` means the port, not the
-        // literal text "[port]" to the only stream. Payload keeps its leading spaces because it
-        // is only reached when there is no bracket to find.
-        const addressPart = args.trimStart();
-        let addressed: string | undefined;
-        let text: string;
-        if (addressPart.startsWith('[')) {
-            const end = addressPart.indexOf(']');
-            if (end < 0) {
-                fail(`unterminated stream name in '${addressPart}'`, 'bad-prefix');
-                return;
-            }
-            const prefix = addressPart.substring(0, end + 1);
-            addressed = prefix === '[]' ? undefined : prefix;         // '[]' is "the only one", stated explicitly
-            text = addressPart.substring(end + 1).replace(/^\s/, ''); // drop the separator, keep the rest
-        } else {
-            text = args;                                              // unbracketed: all of it is payload
-        }
-
-        let target: Sink | undefined;
-        if (addressed) {
-            target = sinks.find((s) => s.prefix === addressed);
-            if (!target) {
-                fail(`no stream named ${addressed}. Known streams: ${names().join(', ') || '(none)'}`, 'unknown-stream', { target: addressed, available: names() });
-                return;
-            }
-        } else if (sinks.length > 1) {
-            fail(`more than one stream, name the one you mean: ${names().join(', ')}`, 'ambiguous', { available: names() });
-            return;
-        } else {
-            target = sinks[0];      // undefined when the session has no streams at all
-        }
-        if (!target) {
-            fail('this session has no serial or RTT streams to send to', 'no-streams', { available: [] });
-            return;
-        }
-
-        if (!target.write(text)) {
-            fail(`${target.prefix} is not connected`, 'not-connected', { target: target.prefix });
-            return;
-        }
-        logger.info(`${target.prefix} <= ${text}`, { source: 'DA', skipConsole: true, command: 'send', target: target.prefix, text });
+        sendToStream(args, sinks, (message) => {
+            const { message: text, level, ...meta } = message as any;
+            logger.log(level ?? "info", text, { ...meta, isConsole: level === "error", skipConsole: level !== "error" });
+        });
     }
 
     private doStatus() {
@@ -902,25 +911,28 @@ export class CliSessionDriver {
             const params: any = {
                 status: port.getStatus(),
                 prefix: port.getPrefix(),
-                ...port.serialConfig
+                ...port.serialConfig,
             };
             return params;
         });
         const obj: any = {
-            'status': this.status,
-            'cwd': process.cwd(),
-            'pid': process.pid,
-            'targetCwd': this.config.cwd,
-            'configName': this.config.name,
-            'serverType': this.config.servertype,
-            'configType': this.config.request,
-            'rtts': this.rtts.map(rtt => ({
-                status: rtt.getStatus(), prefix: rtt.getPrefix(),
-                tcpPort: rtt.options.tcpPort, channel: rtt.options.port, type: rtt.options.type,
+            status: this.status,
+            cwd: process.cwd(),
+            pid: process.pid,
+            targetCwd: this.config.cwd,
+            configName: this.config.name,
+            serverType: this.config.servertype,
+            configType: this.config.request,
+            rtts: this.rtts.map((rtt) => ({
+                status: rtt.getStatus(),
+                prefix: rtt.getPrefix(),
+                tcpPort: rtt.options.tcpPort,
+                channel: rtt.options.port,
+                type: rtt.options.type,
             })),
-            'serialPorts': serialPorts,
-            'socketPath': this.socketPath,
-            'logFile': this.cliArgs.logFile,
+            serialPorts: serialPorts,
+            socketPath: this.socketPath,
+            logFile: this.cliArgs.logFile,
         };
         logger.info(`Session summary: ${JSON.stringify(obj, null, 2)}`);
     }
@@ -1312,17 +1324,20 @@ export class CliSessionDriver {
 
     private async startSocketReader(): Promise<void> {
         await this.checkSocketFree();
-        const socketPath = this.createSocketPath();     // Will have backslashes and .sock suffix on Windows, normal .sock file on Unix
+        const socketPath = this.createSocketPath(); // Will have backslashes and .sock suffix on Windows, normal .sock file on Unix
         let timeout: NodeJS.Timeout | null = null;
         this.socketPromise = new Promise((resolve, reject) => {
             this.server = net.createServer((conn) => {
                 const rl = readline.createInterface({ input: conn });
-                rl.on('line', (line) => {
+                rl.on("line", (line) => {
                     if (this.isPaused) {
                         this.handleInputLinePaused(line, false);
                     } else {
                         this.handleInputLineRunning(line, false);
                     }
+                });
+                rl.on("error", (error) => {
+                    logger.debug(`Socket client error: ${error.message}`, { source: "DA" });
                 });
                 if (!this.customTransport.getRingBuffer().isEmpty()) {
                     // Replay recent history to the new client, trimmed to a whole-line boundary.
@@ -1341,8 +1356,8 @@ export class CliSessionDriver {
                 // Also pipe mux output back to this connection
                 this.serverClients.add(conn);
                 this.hasEverHadClient = true;
-                this.customTransport.addStream(conn, socketPath);
-                conn.on('close', () => {
+                this.customTransport.addStream(conn, `${socketPath}#${++this.clientSeq}`);
+                conn.on("close", () => {
                     this.serverClients.delete(conn);
                     // In socket-pilot mode the last client leaving means nobody is flying. Exit
                     // cleanly rather than lingering: a debug session holds the probe exclusively,
@@ -1351,15 +1366,15 @@ export class CliSessionDriver {
                     // never reach us. Waiting around for a possible re-attach would trade a
                     // recoverable inconvenience for a resource nobody else can use.
                     if (!this.stdinIsPilot && this.hasEverHadClient && this.serverClients.size === 0) {
-                        logger.info('Last client disconnected and there is no stdin to fall back on; ending the session and releasing the probe.', { source: 'DA' });
+                        logger.info("Last client disconnected and there is no stdin to fall back on; ending the session and releasing the probe.", { source: "DA" });
                         this.doExit(false);
                     }
                 });
             });
             this.server.listen(socketPath, () => {
                 this.socketPath = socketPath;
-                this.writeSockFile(socketPath);  // triggers Rust's wait_for_sock_file()
-                logger.info(`Socket server listening on ${socketPath}`, { source: 'DA', isConsole: true });
+                this.writeSockFile(socketPath); // triggers Rust's wait_for_sock_file()
+                logger.info(`Socket server listening on ${socketPath}`, { source: "DA", isConsole: true });
                 if (!this.cliArgs.waitForClient) {
                     resolve();
                 } else {
@@ -1367,26 +1382,33 @@ export class CliSessionDriver {
                     // unbounded wait and stdout carries the mux stream, so without a word here an
                     // operator just sees a process that appears hung.
                     process.stderr.write(
-                        `Waiting for a client to connect before starting the debug session.` + os.EOL +
-                        `  socket: ${socketPath}` + os.EOL +
-                        `  connect with: mcu-debug attach` + os.EOL +
-                        `This waits indefinitely; press Ctrl-C to abort.` + os.EOL);
+                        `Waiting for a client to connect before starting the debug session.` +
+                            os.EOL +
+                            `  socket: ${socketPath}` +
+                            os.EOL +
+                            `  connect with: mcu-ai-debug attach` +
+                            os.EOL +
+                            `This waits indefinitely; press Ctrl-C to abort.` +
+                            os.EOL,
+                    );
                     timeout = setTimeout(() => {
                         if (timeout && this.serverClients.size === 0) {
-                            logger.error('waitForClient is true but no client connected within timeout. Is the client side running and configured correctly?', { source: 'DA', isConsole: true });
+                            logger.error("waitForClient is true but no client connected within timeout. Is the client side running and configured correctly?", { source: "DA", isConsole: true });
                         }
                         timeout = null;
                     }, 5000); // arbitrary timeout to catch listen() failures in waitForClient mode
                 }
-                process.on('exit', () => {
+                process.on("exit", () => {
                     if (this.server) {
                         this.server.close();
                     }
-                    try { fs.unlinkSync(socketPath); } catch (err) { }
+                    try {
+                        fs.unlinkSync(socketPath);
+                    } catch (err) {}
                 });
             });
-            this.server.on('error', (err) => {
-                logger.error(`Socket server error: ${err instanceof Error ? err.message : String(err)}`, { source: 'DA', isConsole: true });
+            this.server.on("error", (err) => {
+                logger.error(`Socket server error: ${err instanceof Error ? err.message : String(err)}`, { source: "DA", isConsole: true });
                 reject(err);
             });
         });
@@ -1405,39 +1427,57 @@ export class CliSessionDriver {
         // path goes under `pipe`, everything else (Unix domain socket) goes under `socket`.
         const sockInfo = {
             pid: process.pid,
-            socket: process.platform === 'win32' ? undefined : socketPath,
-            pipe: process.platform === 'win32' ? socketPath : undefined,
+            socket: process.platform === "win32" ? undefined : socketPath,
+            pipe: process.platform === "win32" ? socketPath : undefined,
             cwd: process.cwd(),
             config: this.config.name,
             started: new Date().toISOString(),
-            logFile: this.cliArgs.logFile
+            logFile: this.cliArgs.logFile,
         };
+        const registry = new SessionRegistry();
+        this.registryRecord = registry.create({
+            ...sockInfo,
+            kind: process.env.MCU_DEBUG_LAUNCH_ORIGIN === "vscode-panel" ? "cockpit" : "cli",
+            status: this.status,
+            config: this.config.name ?? "",
+            windowId: process.env.MCU_AI_DEBUG_WINDOW_ID,
+            executable: this.config.executable,
+        });
+        registry.write(this.registryRecord);
         const socketPathJson = this.createSocketJsonPath();
         try {
             const dir = path.dirname(socketPathJson);
             fs.mkdirSync(dir, { recursive: true });
             fs.writeFileSync(socketPathJson, JSON.stringify(sockInfo, null, 2) + "\n");
         } catch (err) {
-            logger.error(`Failed to write socket file ${socketPathJson}: ${err instanceof Error ? err.message : String(err)}`, { source: 'DA', isConsole: true });
+            logger.error(`Failed to write socket file ${socketPathJson}: ${err instanceof Error ? err.message : String(err)}`, { source: "DA", isConsole: true });
             if (this.cliArgs.waitForClient) {
                 process.exit(1); // Rust side will detect absence of socket file and wait, so we can exit cleanly here and let Rust restart us when ready
             }
             return;
         }
-        logger.debug(`Socket path written to ${socketPathJson}`, { source: 'DA', isConsole: true });
-        process.on('exit', () => {
+        logger.debug(`Socket path written to ${socketPathJson}`, { source: "DA", isConsole: true });
+        process.on("exit", () => {
             try {
                 this.server?.close();
-                fs.unlinkSync(socketPathJson);
-                try { fs.unlinkSync(socketPath); } catch (err) { } // also clean up the socket file itself
-                logger.debug(`Cleaned up socket file ${socketPathJson}`, { source: 'DA', isConsole: true });
+                if (this.registryRecord) registry.remove(this.registryRecord.id);
+                if (fs.existsSync(socketPathJson)) {
+                    const current = JSON.parse(fs.readFileSync(socketPathJson, "utf8"));
+                    if (current.pid === process.pid && (current.socket ?? current.pipe) === socketPath) fs.unlinkSync(socketPathJson);
+                }
+                try {
+                    fs.unlinkSync(socketPath);
+                } catch (err) {} // also clean up the socket file itself
+                logger.debug(`Cleaned up socket file ${socketPathJson}`, { source: "DA", isConsole: true });
             } catch (err) {
-                logger.warn(`Failed to clean up socket file ${socketPathJson}: ${err instanceof Error ? err.message : String(err)}`, { source: 'DA', isConsole: true });
+                logger.warn(`Failed to clean up socket file ${socketPathJson}: ${err instanceof Error ? err.message : String(err)}`, { source: "DA", isConsole: true });
             }
         });
     }
 
     dispose() {
+        for (const socket of this.manualUiClients) socket.destroy();
+        this.manualUiClients.clear();
         CliTelemetry.endSession(this.telemetryId); // no-op if already ended or opted out
         this.notesManager.flushNow();
         SerialPortManager.Dispose();

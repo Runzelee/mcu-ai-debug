@@ -1,3 +1,6 @@
+import * as net from 'node:net';
+import { F5SessionBridge } from './f5-session-bridge';
+import { SessionRegistry, AISessionRecord } from '../common/session-registry';
 // Copyright (c) 2026 MCU-Debug Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +17,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import * as vscode from "vscode";
+import { randomUUID } from "node:crypto";
+import { sessionTelemetry } from "../common/session-telemetry";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -22,13 +27,14 @@ import { CockpitPanel } from "./views/CockpitPanel";
 import { logger } from "../common/logger";
 import { ConfigurationArguments } from "../adapter/servers/common";
 import { ManagedTab } from "./views/ManagedTab";
-import { CockpitToolbarAction, TabKind, TabState } from "@mcu-debug/shared";
+import { CockpitSessionMode, CockpitToolbarAction, TabKind, TabState } from "@mcu-debug/shared";
 import { CLIConfigLoader, ConfigLoaderArgs } from "../cli/cli-config-loader";
 import winston from "winston";
 import { Writable } from "stream";
 import { CLI_SESSION_TYPES, CLISessionType, getHostAdapter } from "../common/host-adapter";
 import JSONC from "jsonc-simple-parser";
 import { LAUNCH_ORIGIN_ENV } from "../analytics/telemetry-core";
+import { resolveConfigurationCommands } from "../common/config-commands";
 
 /**
  * TODO: Task list for AI Cockpit:
@@ -116,6 +122,7 @@ export class AICockpit extends ManagedTab {
     direction: "rx" | "tx" | "both" | undefined = "both";
     private readonly fsPattern = "**/launch.json";
     private process: ChildProcess.ChildProcess | null = null;
+    private independentRtt?: { id: string; name: string; channels: { channel: number; prefix: string; timestamp: boolean; port?: string }[] };
     private logger: winston.Logger | null = null;
     private loggerWriter: Writable | null = null;
     private addedToCockpitPanel = false;
@@ -124,18 +131,101 @@ export class AICockpit extends ManagedTab {
     private selectedConfigName: string | null = null;
     private sessionState: CLISessionType = "not-started";
     private reasonText = "";
+    private starting = false;
+    private bridge?: F5SessionBridge;
+    private attachedSocket?: net.Socket;
+    private attachedRecord?: AISessionRecord;
+    private modeOverride?: CockpitSessionMode;
+    private uiEndpoint?: string;
+    private get sessionMode(): CockpitSessionMode {
+        if (this.modeOverride) return this.modeOverride;
+        return vscode.workspace.getConfiguration("mcu-ai-debug").get<string>("cockpit.sessionMode", "current") === "independent" ? "independent" : "current";
+    }
+    public setSessionBridge(bridge: F5SessionBridge): void {
+        this.bridge = bridge;
+        this.context.subscriptions.push(bridge.onSessionReady((socket) => {
+            if (this.sessionMode === "current" && !this.process && !this.attachedSocket) this.connectRecord(socket.record);
+        }));
+        this.syncSessionMode();
+    }
+    private syncSessionMode(): void {
+        if (this.sessionMode === "independent") this.disconnectSession();
+        else if (!this.process && !this.attachedSocket && this.bridge?.hasSessions) void this.attachSession(true);
+        this.postCockpitUiState();
+    }
+    override async onCockpitModeSelect(mode: CockpitSessionMode): Promise<void> {
+        if (mode !== "independent" && mode !== "current") return;
+        if (this.process || this.starting) { this.postCockpitUiState(); return; }
+        this.modeOverride = mode;
+        // Do not write shared settings.json: other windows may be debugging the same workspace.
+        await this.context.workspaceState.update("mcu-ai-debug.cockpit.sessionMode", mode);
+        this.syncSessionMode();
+    }
+    public async attachSession(currentOnly = false): Promise<void> {
+        if (this.process) { vscode.window.showInformationMessage('Stop the independent Cockpit session before switching sessions.'); return; }
+        let record;
+        if (currentOnly) record = (await this.bridge?.chooseSession(true))?.record;
+        else {
+            const records = new SessionRegistry().list();
+            const choices = records.map(record => ({ label: `${record.config} (${record.kind})`, description: record.cwd,
+                detail: `${record.id} | ${record.status} | window ${record.windowId ?? record.pid}`, record }));
+            record = (await vscode.window.showQuickPick(choices, { title: 'MCU AI Debug CLI: connect to a session', matchOnDescription: true, matchOnDetail: true }))?.record;
+        }
+        if (!record) { vscode.window.showInformationMessage('No F5 session selected. Start F5 or select a running session.'); return; }
+        this.connectRecord(record);
+    }
+    private connectRecord(record: AISessionRecord): void {
+        if (this.process || this.attachedRecord?.id === record.id) return;
+        this.attachedSocket?.destroy();
+        this.clear();
+        this.stdoutPending = '';
+        this.reasonText = '';
+        this.selectedConfigName = record.config;
+        this.sessionState = CLI_SESSION_TYPES.includes(record.status as CLISessionType) ? record.status as CLISessionType : "starting";
+        const socket = net.connect((record.socket ?? record.pipe)!);
+        this.attachedRecord = record;
+        this.attachedSocket = socket;
+        socket.on('connect', () => { this.setState({ kind: 'active' }); this.postCockpitUiState(); });
+        socket.on('data', chunk => { this.stdoutPending = this.handleProcessChunk(chunk.toString(), this.stdoutPending, false); });
+        socket.on('error', error => this.send(`Connection failed: ${error.message}\n`));
+        socket.on('close', () => {
+            if (this.attachedSocket !== socket) return;
+            this.attachedSocket = undefined;
+            this.attachedRecord = undefined;
+            this.sessionState = 'terminated';
+            this.setInactive();
+        });
+    }
+    public disconnectSession(): void {
+        this.attachedSocket?.destroy();
+        this.attachedSocket = undefined;
+        this.attachedRecord = undefined;
+        if (!this.process) {
+            this.sessionState = "not-started";
+            this.setInactive();
+        }
+    }
     private stdoutPending = "";
     private stderrPending = "";
 
     private constructor(private context: vscode.ExtensionContext) {
         // Private constructor to enforce singleton pattern
         super("ai-cockpit", "AI Cockpit", "Enter GDB command or press F1 for help", "cooked");
+        this.modeOverride = context.workspaceState.get<CockpitSessionMode>("mcu-ai-debug.cockpit.sessionMode");
         this.logger = this.createLogger();
         this.enumerateLaunchConfigurations().then(configs => {
             this.launchConfigCache = configs;
+            this.postCockpitUiState();
         });
         this.setInactive();
         this.setupDocWatcher();
+        this.context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration("mcu-ai-debug.cockpit.sessionMode")) {
+                this.modeOverride = undefined;
+                void this.context.workspaceState.update("mcu-ai-debug.cockpit.sessionMode", undefined);
+                this.syncSessionMode();
+            }
+        }));
         this.addToCockpitPanel();
     }
 
@@ -180,76 +270,97 @@ export class AICockpit extends ManagedTab {
     }
 
     public async startDebugSession(configName?: string) {
-        if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
-            return {};
-        }
-        // Prepare for new session, clear old content
-        this.clear();
-        this.firstErrorOfSession = false;
-        this.reasonText = "";
-
-        const root = vscode.workspace.workspaceFolders[0];
-        let config = this.selectLaunchConfiguration(configName) as ConfigurationArguments | undefined;
-        if (!config) {
-            return;
-        }
-        this.selectedConfigName = config.name ?? this.selectedConfigName;
-        this.postCockpitUiState();
-        // (config as any).startedFromAICockpit = true;
-        const configLoaderArgs: ConfigLoaderArgs = {
-            json: "", // We are passing a parsed config already, so this a no-op
-            config: config.name,
-            configParsed: config,
-            builtins: CLIConfigLoader.gatherBuiltins(root.uri.fsPath),
-        };
-        const configLoader = new CLIConfigLoader(configLoaderArgs, this.logger!, true);
+        if (this.starting) return;
+        this.starting = true;
         try {
-            /**
-             * We resolve using the CLIConfigLoader which is the same code path used by the CLI. This ensures that any config
-             * transformations or remote server setups are consistent between the CLI and the AI Cockpit. However the resution
-             * of settings and builtins occur in the context of this VSCode Extension, so any variables that depend on the environment
-             * (e.g. ${workspaceFolder}, ${env:VAR}, etc.) will be resolved based on the extension's context. This means that if there
-             * are any variables that need to be resolved based on the debug adapter's environment, we may need to add support for that
-             * in the future. For now, we assume that all necessary variables can be resolved in the extension's context.
-             *
-             * As a bonus, the host config will also be resolved and a proxy server started if needed, so the config returned from the loader
-             * will be marked as resolved and ready to use by the CLI driver without any additional setup.
-             */
-            config = await configLoader.loadConfiguration(configLoaderArgs);
-        } catch (error) {
-            const err = `Failed to load configuration: ${error}`;
-            this.logger?.error(err);
-            return;
-        }
-        if (!config) {
-            // Errors should have been logged already
-            return;
-        }
-        // Remove the console server port from the config since the cockpit will connect to that directly and we don't want the debug adapter to also connect to it.
-        delete (config as any).pvtGdbServerConsolePort;
+            if (this.process || this.attachedSocket) { vscode.window.showInformationMessage('Cockpit is already connected to a session.'); return; }
+            if (this.sessionMode === "current") {
+                if (this.bridge?.hasSessions) await this.attachSession(true);
+                else {
+                    const config = this.selectLaunchConfiguration(configName);
+                    if (config) await vscode.debug.startDebugging(vscode.workspace.workspaceFolders?.[0], config);
+                }
+                return;
+            }
+            this.uiEndpoint = await this.bridge?.getUiEndpoint();
+            if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+                return {};
+            }
+            // Prepare for new session, clear old content
+            this.clear();
+            this.firstErrorOfSession = false;
+            this.reasonText = "";
 
-        this.clear();
-        const jsonFile = path.join(os.tmpdir(), `mcu-debug-ai-cockpit-${process.pid}.json`).replace(/\\/g, "/");
-        try {
-            const launchJson: any = {
-                configurations: [config]
+            const root = vscode.workspace.workspaceFolders[0];
+            let config = this.selectLaunchConfiguration(configName) as ConfigurationArguments | undefined;
+            if (!config) {
+                return;
+            }
+            this.selectedConfigName = config.name ?? this.selectedConfigName;
+            this.postCockpitUiState();
+            try {
+                config = await resolveConfigurationCommands(config, async (command, configuration) =>
+                    vscode.commands.executeCommand(command, configuration));
+            } catch (error) {
+                this.logger?.error(`Failed to resolve command variables: ${error}`);
+                return;
+            }
+            // (config as any).startedFromAICockpit = true;
+            const configLoaderArgs: ConfigLoaderArgs = {
+                json: "", // We are passing a parsed config already, so this a no-op
+                config: config.name,
+                configParsed: config,
+                builtins: CLIConfigLoader.gatherBuiltins(root.uri.fsPath),
             };
-            fs.writeFileSync(jsonFile, JSON.stringify(launchJson, null, 2));
-        } catch (error) {
-            const err = `Failed to write AI Cockpit config file: ${error}`;
-            this.logger?.error(err);
-            this.logger?.error(`Failed to write AI Cockpit config file: ${error}`);
-            return;
-        }
+            const configLoader = new CLIConfigLoader(configLoaderArgs, this.logger!, true);
+            try {
+                /**
+                 * We resolve using the CLIConfigLoader which is the same code path used by the CLI. This ensures that any config
+                 * transformations or remote server setups are consistent between the CLI and the AI Cockpit. However the resution
+                 * of settings and builtins occur in the context of this VSCode Extension, so any variables that depend on the environment
+                 * (e.g. ${workspaceFolder}, ${env:VAR}, etc.) will be resolved based on the extension's context. This means that if there
+                 * are any variables that need to be resolved based on the debug adapter's environment, we may need to add support for that
+                 * in the future. For now, we assume that all necessary variables can be resolved in the extension's context.
+                 *
+                 * As a bonus, the host config will also be resolved and a proxy server started if needed, so the config returned from the loader
+                 * will be marked as resolved and ready to use by the CLI driver without any additional setup.
+                 */
+                config = await configLoader.loadConfiguration(configLoaderArgs);
+            } catch (error) {
+                const err = `Failed to load configuration: ${error}`;
+                this.logger?.error(err);
+                return;
+            }
+            if (!config) {
+                // Errors should have been logged already
+                return;
+            }
+            // Remove the console server port from the config since the cockpit will connect to that directly and we don't want the debug adapter to also connect to it.
+            delete (config as any).pvtGdbServerConsolePort;
 
-        if (!this.checkNodeInstalled()) {
-            this.logger?.error(`Node.js version 22 or higher is required to run the AI Cockpit. Please install or update Node.js and make sure it's in your PATH.`);
-            return;
-        }
+            this.clear();
+            const jsonFile = path.join(os.tmpdir(), `mcu-debug-ai-cockpit-${process.pid}.json`).replace(/\\/g, "/");
+            try {
+                const launchJson: any = {
+                    configurations: [config]
+                };
+                fs.writeFileSync(jsonFile, JSON.stringify(launchJson, null, 2));
+            } catch (error) {
+                const err = `Failed to write AI Cockpit config file: ${error}`;
+                this.logger?.error(err);
+                this.logger?.error(`Failed to write AI Cockpit config file: ${error}`);
+                return;
+            }
 
-        this.sessionState = "starting";
-        this.postCockpitUiState();
-        this.launchDebugCLI(jsonFile, config, root);
+            if (!this.checkNodeInstalled()) {
+                this.logger?.error(`Node.js version 22 or higher is required to run the AI Cockpit. Please install or update Node.js and make sure it's in your PATH.`);
+                return;
+            }
+
+            this.sessionState = "starting";
+            this.postCockpitUiState();
+            this.launchDebugCLI(jsonFile, config, root);
+        } finally { this.starting = false; this.postCockpitUiState(); }
     }
 
     private isNodeInstalled = false;
@@ -261,11 +372,23 @@ export class AICockpit extends ManagedTab {
             args.push("--log-file", config.cliOptions.logFile);
         }
         this.logger?.info(`Starting AI Cockpit debug session with command: ${cmd} ${args.join(" ")}`, { color: 'green.bold' });
+        this.independentRtt = { id: randomUUID(), name: config.name ?? "Independent Cockpit", channels:
+            (config.rttConfig?.decoders ?? []).filter((d: any) => d.type === "console").map((d: any) => ({
+                channel: Number(d.port), prefix: `[${String(d.label ?? `RTT#${d.port}`).replace(/^\[|\]$/g, "")}]`, timestamp: Boolean(d.timestamp),
+            })) };
+        const uartLabels = new Set<string>();
+        for (const port of config.serialConfig?.enabled ? config.serialConfig.ports ?? [] : []) {
+            const base = String(port.label || path.basename(port.path || port.serial || port.match || "UART")).replace(/^\s*[\[\{(]+|[\]\})]+\s*$/g, "");
+            let label = base, counter = 1;
+            while (uartLabels.has(label)) label = `${base}-${counter++}`;
+            uartLabels.add(label);
+            this.independentRtt.channels.push({ channel: 0, port: port.path || port.serial || label, prefix: `[${label}]`, timestamp: false });
+        }
         this.process = ChildProcess.spawn(cmd, args, {
             cwd: root.uri.fsPath,
             // Stamp the launch origin so CLI telemetry can tell a cockpit-panel session apart
             // from a terminal/TUI one. See LAUNCH_ORIGIN_ENV in analytics/telemetry-core.ts.
-            env: { ...process.env, [LAUNCH_ORIGIN_ENV]: "vscode-panel" },
+            env: { ...process.env, [LAUNCH_ORIGIN_ENV]: "vscode-panel", MCU_AI_DEBUG_UI_SOCKET: this.uiEndpoint, MCU_AI_DEBUG_WINDOW_ID: this.bridge?.windowIdentity ?? String(process.pid) },
             stdio: "pipe",
             windowsHide: true
         });
@@ -282,6 +405,7 @@ export class AICockpit extends ManagedTab {
             this.stderrPending = this.handleProcessChunk(str, this.stderrPending, true);
         });
         this.process.on("close", (code) => {
+            this.endIndependentRtt();
             this.process = null;
             this.sessionState = "terminated";
             this.setInactive();
@@ -289,6 +413,7 @@ export class AICockpit extends ManagedTab {
             this.postCockpitUiState();
         });
         this.process.on("error", (err) => {
+            this.endIndependentRtt();
             this.process = null;
             this.sessionState = "not-started";
             this.setInactive();
@@ -329,10 +454,11 @@ export class AICockpit extends ManagedTab {
 
     onUserInput(text: string): void {
         const trimmed = text.trim();
-        if (!this.process && ((trimmed === "run" || trimmed === "start"))) {
+        if (!this.process && !this.attachedSocket && ((trimmed === "run" || trimmed === "start"))) {
             this.startDebugSession(this.selectedConfigName ?? undefined);
             return;
         }
+        if (this.attachedSocket?.writable) { this.attachedSocket.write(text + '\n'); return; }
         if (this.process && this.process.stdin?.writable) {
             this.process.stdin?.write(text + "\n");
         }
@@ -410,7 +536,37 @@ export class AICockpit extends ManagedTab {
         return trailing;
     }
 
+    private endIndependentRtt(): void {
+        if (this.independentRtt) sessionTelemetry.emit("end", this.independentRtt.id);
+        this.independentRtt = undefined;
+    }
+
     private handleProcessLine(line: string, isStderr: boolean): void {
+        // Tap the independent driver's existing stdout; never add a target connection.
+        if (!this.attachedSocket && !isStderr && this.independentRtt) {
+            let text = line.replace(/\x1b\[[0-9;]*m/g, "");
+            let transport: string | undefined, port: string | undefined;
+            try { const event = JSON.parse(text); transport = event.source; port = event.port; if (transport === "RTT" || transport === "serial") text = event.message; } catch { }
+            for (const channel of this.independentRtt.channels) if (text.startsWith(channel.prefix + " ") && (!transport || transport === (channel.port ? "serial" : "RTT"))) {
+                let payload = text.slice(channel.prefix.length).trimStart();
+                // Timestamped consoles prepend a host ISO timestamp before firmware text.
+                if (channel.timestamp) payload = payload.replace(/^\[\d{4}-\d{2}-\d{2}T[^\]]+\]\s+/, "");
+                sessionTelemetry.emit("data", { sessionId: this.independentRtt.id, sessionName: this.independentRtt.name,
+                    source: channel.port ? "serial" : "RTT", ...(channel.port ? { port: port ?? channel.port } : { channel: channel.channel }), prefix: channel.prefix, data: Buffer.from(payload + "\n") });
+                break;
+            }
+        }
+        if (this.attachedSocket && line.startsWith('{')) {
+            try {
+                const event = JSON.parse(line);
+                if (event.source === 'DA' && CLI_SESSION_TYPES.includes(event.status as CLISessionType)) {
+                    this.sessionState = event.status;
+                    this.reasonText = event.reason ?? '';
+                    this.postCockpitUiState();
+                }
+                line = event.message ?? line;
+            } catch { }
+        }
         if (line.startsWith(AICockpit.AI_REQUEST_PREFIX)) {
             const text = line.slice(AICockpit.AI_REQUEST_PREFIX.length).trim();
             CockpitPanel.instance?.postToWebview({ type: "ai-request", tabId: this.tabId, text });
@@ -466,17 +622,17 @@ export class AICockpit extends ManagedTab {
                 }
                 break;
             case "restart":
-                if (this.process) {
+                if (this.process || this.attachedSocket) {
                     this.onUserInput("restart");
                 }
                 break;
             case "reset":
-                if (this.process) {
+                if (this.process || this.attachedSocket) {
                     this.onUserInput("reset");
                 }
                 break;
             case "stop":
-                if (this.process) {
+                if (this.process || this.attachedSocket) {
                     this.onUserInput("exit");
                 }
                 break;
@@ -484,7 +640,7 @@ export class AICockpit extends ManagedTab {
     }
 
     private getButtonEnabledState(): Record<CockpitToolbarAction, boolean> {
-        const hasProcess = !!this.process;
+        const hasProcess = !!(this.process || this.attachedSocket);
         switch (this.sessionState) {
             case "paused":
                 return {
@@ -535,9 +691,11 @@ export class AICockpit extends ManagedTab {
             type: "cockpit-ui-state",
             tabId: this.tabId,
             state: {
-                availableConfigs: Object.keys(this.launchConfigCache),
+                sessionMode: this.sessionMode,
+                modeLocked: !!this.process || this.starting,
+                availableConfigs: [...new Set([...Object.keys(this.launchConfigCache), ...(this.attachedRecord ? [this.attachedRecord.config] : [])])],
                 selectedConfig: this.selectedConfigName,
-                statusText: statusText,
+                statusText: this.sessionMode === "current" && !this.attachedSocket && !this.process && !this.starting ? "Waiting for VS Code debug session" : statusText,
                 buttonEnabled: this.getButtonEnabledState(),
             },
         });

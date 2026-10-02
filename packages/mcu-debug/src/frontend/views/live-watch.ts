@@ -16,7 +16,7 @@
 import * as vscode from "vscode";
 import { TreeItem, TreeItemCollapsibleState, DebugSession, ProviderResult, Event, EventEmitter, Disposable } from "vscode";
 import { IDebugSession } from "../../common/host-adapter";
-import { TreeViewProviderDelegate, TreeItem as WebviewTreeItem } from "../webview_tree/editable-tree";
+import { BatchOperationResult, TreeViewProviderDelegate, TreeItem as WebviewTreeItem } from "../webview_tree/editable-tree";
 import {
     LiveUpdateEvent,
     RegisterClientRequest,
@@ -32,6 +32,9 @@ import {
 } from "../../adapter/custom-requests";
 import { VarUpdateRecord } from "../../adapter/gdb-mi/mi-types";
 import { ConfigurationArguments } from "../../adapter/servers/common";
+import { LiveWatchLogger } from "./live-watch-logger";
+import { LiveWatchGrapher } from "./live-watch-grapher";
+import { parseBatchExpressions } from "./live-watch-batch";
 
 // Configuration interfaces
 interface LiveWatchConfig {
@@ -178,6 +181,8 @@ export class LiveVariableNode {
     public getName() {
         return this.name;
     }
+
+    public getType(): string { return this.type; }
 
     public getValue() {
         return this.value;
@@ -694,6 +699,7 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
     private refreshCallback?: () => void;
     private updateComposite: (items: WebviewTreeItem[]) => void = () => { };
     private grapher?: LiveWatchGrapher;
+    private lastSampleAt: number | null = null;
     public mcpListeners: ((time: number, data: { [key: string]: string }) => void)[] = [];
 
     protected oldState = new Map<string, vscode.TreeItemCollapsibleState>();
@@ -973,6 +979,38 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
         return gatherNodes(this.rootNode);
     }
 
+    public assertPanelSession(sessionId: string): void {
+        if (LiveWatchTreeProvider.session?.id !== sessionId) {
+            throw new Error("Live Watch panel belongs to another session or is not active");
+        }
+    }
+
+    public getCachedPanelSnapshot(sessionId: string): { status: string; sessionId: string; variables: Record<string, object>; sampledAt: number | null } {
+        this.assertPanelSession(sessionId);
+        const variables: Record<string, object> = {};
+        const visit = (node: LiveVariableNode) => {
+            if (node.isDummyNode()) return;
+            if (node !== this.rootNode && node.getExpr()) {
+                variables[node.getExpr()] = { value: node.getDisplayValue(), type: node.getType(),
+                    expanded: node.expanded, composite: node.isComposite() };
+            }
+            for (const child of node.getChildren()) visit(child);
+        };
+        visit(this.rootNode);
+        return { status: 'OK', sessionId, variables, sampledAt: this.lastSampleAt };
+    }
+
+    public async changePanelExpression(sessionId: string, action: string, expression: unknown): Promise<object> {
+        this.assertPanelSession(sessionId);
+        if (typeof expression !== 'string' || !expression.trim() || /[\r\n]/.test(expression)) throw new Error('One expression is required');
+        expression = expression.trim();
+        if (action === 'add') return this.onAddMany(expression as string);
+        const node = this.rootNode.getChildren().find(candidate => candidate.getExpr() === expression);
+        if (!node) return { changed: 0, status: 'NOT_FOUND' };
+        this.removeWatchExpr(node);
+        return { changed: 1, status: 'OK' };
+    }
+
     public gatherLeafExprs(): string[] {
         return this.gatherLeafNodes().map(n => n.getExpr()).filter(e => e);
     }
@@ -1242,6 +1280,7 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
             }
 
             // MCP listeners
+            this.lastSampleAt = Date.now();
             if (this.mcpListeners && this.mcpListeners.length > 0) {
                 const now = Date.now();
                 const mcpData: { [key: string]: string } = {};
@@ -1446,6 +1485,7 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
 
     private resetSession(session: vscode.DebugSession) {
         LiveWatchTreeProvider.session = session;
+        this.lastSampleAt = null;
         this.sessionStatus = "none";
         this.rootNode.reset(true);
         this.clearGdbVarNameMap();
@@ -1498,7 +1538,7 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
             return;
         }
         const val = await vscode.window.showInputBox({
-            placeHolder: "Enter a valid C/gdb expression. Must be a global variable expression",
+            placeHolder: "Enter a valid C/C++ GDB expression. Use a global/static variable; qualify C++ namespaces.",
             ignoreFocusOut: true,
             value: node.getName(),
         });

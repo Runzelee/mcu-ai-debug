@@ -15,7 +15,7 @@
 
 const EventEmitter = require('events');
 
-import type { CockpitToolbarAction, TabDescriptor, TabInputMode, TabKind, TabState, ToUi, FromUi } from "@mcu-debug/shared";
+import type { CockpitSessionMode, CockpitToolbarAction, TabDescriptor, TabInputMode, TabKind, TabState, ToUi, FromUi } from "@mcu-debug/shared";
 import { CockpitPanel } from "./CockpitPanel";
 
 const allUUids = new Set<string>();
@@ -265,6 +265,8 @@ export abstract class ManagedTab {
     }
 
     /** Called when the engineer changes the cockpit launch configuration selection. */
+    onCockpitModeSelect(_mode: CockpitSessionMode): void {}
+
     onCockpitConfigSelect(_configName: string): void {
         // Default no-op.
     }

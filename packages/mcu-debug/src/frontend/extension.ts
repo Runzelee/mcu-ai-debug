@@ -1,3 +1,4 @@
+import { F5SessionBridge } from './f5-session-bridge';
 // Copyright (c) 2026 MCU-Debug Authors.
 // This source code is licensed under the MIT license found in the
 // LICENSE-MIT file in the root directory of this source tree.
@@ -10,9 +11,11 @@ import * as fs from "fs";
 import { MCUDebugChannel } from "./dbgmsgs";
 import { LiveWatchTreeProvider, LiveVariableNode } from "./views/live-watch";
 import { LiveWatchGrapher } from "./views/live-watch-grapher";
+import { RttLiveWatchProvider } from "./views/rtt-live-watch";
 import { LiveWatchMcpServer } from "./mcp-server";
 import { EditableTreeViewProvider } from "./webview_tree/editable-tree";
 import { CockpitPanel } from "./views/CockpitPanel";
+import { addUart } from "./uart-actions";
 import { SerialPortManager } from "../common/serial-manager";
 
 import { RTTCore, SWOCore } from "../common/swo/swo-core";
@@ -56,7 +59,9 @@ class ServerStartedPromise {
 export class MCUDebugExtension {
     private gdbServerConsole: GDBServerConsole | null = null;
 
+    private sessionBridge!: F5SessionBridge;
     private liveWatchProvider!: LiveWatchTreeProvider;
+    public rttWatchProvider!: RttLiveWatchProvider;
     private liveWatchWebview!: EditableTreeViewProvider;
     private liveWatchGrapher!: LiveWatchGrapher;
     private liveWatchMcpServer!: LiveWatchMcpServer;
@@ -86,7 +91,7 @@ export class MCUDebugExtension {
                 const promptDismissedKey = "mcu-debug.cliPromptDismissed";
                 if (!this.isBinDirInPath() && !context.globalState.get<boolean>(promptDismissedKey, false)) {
                     vscode.window.showInformationMessage(
-                        "The mcu-debug CLI tools are ready. Would you like to add them to your PATH?",
+                        "The MCU AI Debug CLI tools are ready. Would you like to add them to your PATH?",
                         "Yes",
                         "No",
                         "Don't Ask Again"
@@ -110,10 +115,7 @@ export class MCUDebugExtension {
         AICockpit.getInstance(context);
         context.subscriptions.push(
             vscode.window.registerWebviewViewProvider(CockpitPanel.viewId, this.cockpitPanel),
-            vscode.commands.registerCommand("mcu-debug.cockpit.addUart", () => {
-                // TODO: show port picker and call this.cockpitPanel.addTab(new UartManagedTab(...))
-                vscode.window.showInformationMessage("Add UART — not yet implemented");
-            }),
+            vscode.commands.registerCommand("mcu-debug.cockpit.addUart", () => addUart(this.serialPortManager, () => this.sessionBridge.sessions, this.cockpitPanel)),
             // The webview's right-click menu passes back the data-vscode-context of the
             // element under the pointer, which carries the tab that was clicked.
             vscode.commands.registerCommand("mcu-debug.cockpit.clear", (menuContext?: { tabId?: string }) => {
@@ -125,6 +127,11 @@ export class MCUDebugExtension {
         this.liveWatchWebview = new EditableTreeViewProvider(this.context.extensionUri, this.liveWatchProvider);
         this.liveWatchGrapher = new LiveWatchGrapher(this.context.extensionPath);
         this.liveWatchMcpServer = new LiveWatchMcpServer(this.liveWatchProvider);
+        const sessionBridge = this.sessionBridge = new F5SessionBridge(this.liveWatchProvider);
+        AICockpit.getInstance(context).setSessionBridge(sessionBridge);
+        context.subscriptions.push(sessionBridge);
+        context.subscriptions.push(vscode.commands.registerCommand('mcu-ai-debug.selectSession', () => AICockpit.getInstance(context).attachSession()));
+        context.subscriptions.push(vscode.commands.registerCommand('mcu-ai-debug.disconnectSession', () => AICockpit.getInstance(context).disconnectSession()));
         
         this.liveWatchProvider.setRefreshCallback(() => this.liveWatchWebview.refresh());
         this.liveWatchProvider.setUpdateItemsCallback((items) => this.liveWatchWebview.updateComposite(items));
@@ -135,12 +142,24 @@ export class MCUDebugExtension {
             if (event.affectsConfiguration("mcu-ai-debug.enableMcp")) {
                 this.mcpConfigurationTask = this.mcpConfigurationTask
                     .then(() => this.applyLegacyMcpSetting())
-                    .catch((err) => vscode.window.showWarningMessage(`Legacy MCP setting failed: ${err}`));
+                    .catch((err) => {
+                        vscode.window.showWarningMessage(`Legacy MCP setting failed: ${err}`);
+                    });
             }
         }));
         context.subscriptions.push({ dispose: () => this.liveWatchMcpServer.dispose() });
 
         context.subscriptions.push(vscode.window.registerWebviewViewProvider("mcu-debug.liveWatch", this.liveWatchWebview));
+        this.rttWatchProvider = new RttLiveWatchProvider(context);
+        context.subscriptions.push(this.rttWatchProvider,
+            vscode.window.registerWebviewViewProvider("mcu-ai-debug.rttLiveWatch", this.rttWatchProvider.tree),
+            vscode.commands.registerCommand("mcu-ai-debug.rttWatch.copyFirmwarePrompt", () => this.rttWatchProvider.onCopyFirmwarePrompt()),
+            vscode.commands.registerCommand("mcu-ai-debug.rttWatch.saveSnapshot", () => this.rttWatchProvider.saveSnapshot()),
+            vscode.commands.registerCommand("mcu-ai-debug.rttWatch.startRecording", () => this.rttWatchProvider.startRecording()),
+            vscode.commands.registerCommand("mcu-ai-debug.rttWatch.stopRecording", () => this.rttWatchProvider.stopRecording()),
+            vscode.commands.registerCommand("mcu-ai-debug.rttWatch.openGraph", () => this.rttWatchProvider.openGraph()),
+            vscode.commands.registerCommand("mcu-ai-debug.rttWatch.clear", () => this.rttWatchProvider.clear()),
+        );
 
         vscode.commands.executeCommand("setContext", `mcu-debug:${MCUDebugKeys.VARIABLE_DISPLAY_MODE}`, config.get(MCUDebugKeys.VARIABLE_DISPLAY_MODE, true));
 
@@ -186,14 +205,14 @@ export class MCUDebugExtension {
             vscode.commands.registerCommand("mcu-debug.depositProvision", (data: ProvisioningResults) => this.depositProvision(data)),
 
             vscode.commands.registerCommand("mcu-debug.cockpit.startDebugSession", (arg: string | undefined) => {
-                AICockpit.getInstance(this.context)?.startDebugSession(arg);
+                return AICockpit.getInstance(this.context)?.startDebugSession(arg);
             }),
 
             vscode.commands.registerCommand("mcu-debug.installCli", () => {
                 context.globalState.update("mcu-debug.cliPromptDismissed", true);
                 const installerScriptPath = path.join(context.extensionPath, "support", "install-cli.js");
                 const terminal = vscode.window.createTerminal({
-                    name: "mcu-debug CLI Installer",
+                    name: "mcu-ai-debug CLI Installer",
                 });
                 terminal.sendText(`node "${installerScriptPath}"`);
                 terminal.show();
@@ -907,32 +926,54 @@ export class MCUDebugExtension {
         this.liveWatchProvider.moveDownNode(node);
     }
 
+    private addSelectionToLiveWatch() {
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+            const selection = editor.selection;
+            const text = editor.document.getText(selection).trim();
+            if (text) {
+                this.liveWatchProvider.addWatchExpr(text);
+            } else {
+                const wordRange = editor.document.getWordRangeAtPosition(selection.active);
+                if (wordRange) {
+                    const word = editor.document.getText(wordRange);
+                    this.liveWatchProvider.addWatchExpr(word);
+                }
+            }
+        }
+    }
+
+    private startLiveWatchRecording() {
+        this.liveWatchProvider.startRecording();
+    }
+
+    private saveLiveWatchSnapshot() {
+        this.liveWatchProvider.saveSnapshot();
+    }
+
+    private stopLiveWatchRecording() {
+        this.liveWatchProvider.stopRecording();
+    }
+
+    private openLiveWatchGraph() {
+        this.liveWatchGrapher.openGraph(() => this.liveWatchProvider.gatherLeafExprs());
+    }
+
     private ensureWrapperScripts(extensionPath: string) {
         const binDir = path.join(os.homedir(), ".mcu-debug", "bin");
         try {
             mkdirSync(binDir, { recursive: true });
 
-            const serverExePath = getHelperExecutable(extensionPath);
-            if (!existsSync(serverExePath)) {
-                MCUDebugChannel.debugMessage(`Wrapper script creation failed. Missing mdbg executable at ${serverExePath}`);
-                return;
-            }
-            const fSlashPath = serverExePath.replace(/\\/g, "/");
-
-            // macOS & Linux wrapper
-            const bashWrapperPath = path.join(binDir, "mcu-debug");
+            const entryPath = path.join(extensionPath, 'dist', 'mcu-ai-debug-cli.js');
+            const fSlashPath = entryPath.replace(/\\/g, '/');
             const bashContent = `#!/usr/bin/env bash
-exec "${fSlashPath}" "\$@"
+exec node "${fSlashPath}" "\$@"
 `;
-
-            // Windows wrapper
-            const winWrapperPath = path.join(binDir, "mcu-debug.cmd");
-            const windowsExtPath = path.normalize(fSlashPath);
-            const winContent = `@"${windowsExtPath}" %*
-`;
-
-            this.writeIfDifferent(bashWrapperPath, bashContent, true);
-            this.writeIfDifferent(winWrapperPath, winContent, false);
+            const winContent = `@node "${path.normalize(entryPath)}" %*\n`;
+            for (const name of ['mcu-ai-debug', 'mcu-debug']) {
+                this.writeIfDifferent(path.join(binDir, name), bashContent, true);
+                this.writeIfDifferent(path.join(binDir, name + '.cmd'), winContent, false);
+            }
         } catch (error) {
             MCUDebugChannel.debugMessage(`Failed to create wrapper scripts directory: ${error}`);
         }
@@ -988,110 +1029,6 @@ exec "${fSlashPath}" "\$@"
         } catch (error) {
             MCUDebugChannel.debugMessage(`Error writing provisioning results to file: ${error}`);
         }
-    }
-}
-
-function logTmp(msg: string) {
-    const tmpFile = os.tmpdir() + "/mcu-debug-uri.log";
-    const currentTime = new Date().toLocaleString();
-    fs.appendFileSync(tmpFile, currentTime + ": " + msg + "\n");
-}
-
-class MyUriHandler implements vscode.UriHandler {
-    constructor(private context: vscode.ExtensionContext) {
-        // Nothing to do in the constructor for now
-    }
-    // This function will get run when something redirects to VS Code
-    // with your extension id as the authority.
-    handleUri(uri: vscode.Uri): vscode.ProviderResult<void> {
-        // vscode.window.showInformationMessage(`[mcu-debug] handleUri called with URI: ${uri.toString()}`);
-        logTmp(`[mcu-debug] handleUri called with URI: ${uri.toString()}`);
-        if ((uri.path === "/provision") && uri.query) {
-            // The request is one JSON param (`req`) so every field keeps its real
-            // type — `v` is a number, `args` is an array. (URLSearchParams would
-            // otherwise String()-coerce everything to strings / "[object Object]".)
-            // A `const` (via IIFE) so the narrowing below survives into the async
-            // `.then()` closures where `obj` is used.
-            const obj: ProxyProvisionRequest | undefined = (() => {
-                const raw = new URLSearchParams(uri.query).get("req");
-                if (!raw) {
-                    return undefined;
-                }
-                try {
-                    return JSON.parse(raw) as ProxyProvisionRequest;
-                } catch {
-                    return undefined; // malformed JSON → treat as no valid request
-                }
-            })();
-            logTmp(`[mcu-debug] handleUri parsed request: ${JSON.stringify(obj)}`);
-            if (obj && obj.v === 1 && obj.api && obj.resultsFile) {
-                let error = "";
-                const cmd = `mcu-debug-proxy.${obj.api}`;
-                try {
-                    const args = obj.args || [];
-                    vscode.commands.executeCommand(cmd, ...args).then((res) => {
-                        if (res) {
-                            this.depositProvision(obj, "", res);
-                        } else {
-                            this.depositProvision(obj, `No result returned from command: ${cmd}`, undefined);
-                        }
-                    })
-                } catch (e) {
-                    this.depositProvision(obj, cmd + ': Error: ' + (e ? e.toString() : "unknown error"), undefined);
-                }
-            }
-        }
-    }
-
-    private depositProvision(obj: ProxyProvisionRequest, error: string, result: any) {
-        const results: ProvisioningResults = {
-            resultsFile: obj.resultsFile,
-            error: error,
-            result: result,
-        };
-        logTmp(`[mcu-debug] handleUri parsed request: ${JSON.stringify(obj)}`);
-        vscode.commands.executeCommand("mcu-debug.depositProvision", results).then((reason) => {
-            logTmp(`[mcu-debug] depositProvision completed: ${reason}`);
-        });
-    }
-
-    public validateAuthority(authority: string): Promise<boolean> {
-        return new Promise<boolean>(async (resolve) => {
-            let resolved = false;
-            let permissions = this.context.globalState.get<string[]>("mcu-debug-proxy.authorizedAuthorities", []);
-            if (permissions.includes(authority)) {
-                return resolve(true);
-            }
-            const timer = setTimeout(() => {
-                if (!resolved) {
-                    resolved = true;
-                    return resolve(false);
-                }
-            }, 30_000); // 30 seconds timeout for user to respond
-            const choices = ["Deny", "Allow", "Always Allow"];
-            const result = await vscode.window.showWarningMessage(
-                `The authority "${authority}" is requesting access to the MCU Debug Proxy. Do you want to allow it?`,
-                { modal: true },
-                ...choices
-            );
-
-            if (result === choices[1] || result === choices[2]) {
-                if (result === choices[2]) {
-                    permissions.push(authority);
-                    this.context.globalState.update("mcu-debug-proxy.authorizedAuthorities", permissions);
-                }
-                if (!resolved) {
-                    clearTimeout(timer);
-                    resolved = true;
-                    return resolve(true);
-                }
-            }
-            if (!resolved) {
-                clearTimeout(timer);
-                resolved = true;
-                return resolve(false);
-            }
-        });
     }
     private async applyLegacyMcpSetting(): Promise<void> {
         const config = vscode.workspace.getConfiguration("mcu-ai-debug");
@@ -1263,7 +1200,7 @@ class MyUriHandler implements vscode.UriHandler {
         const docStr = [
             "# MCU-Debug MCP Tool Reference (Deprecated)",
             "",
-            "> This legacy integration is opt-in. The mcu-debug CLI is the supported AI interface; use these tools only when `mcu-ai-debug.enableMcp` is enabled.",
+            "> This legacy integration is opt-in. The mcu-ai-debug CLI is the supported AI interface; use these tools only when `mcu-ai-debug.enableMcp` is enabled.",
             "",
             "> **If you are an AI assistant reading this file: STOP. Do NOT browse the MCU-Debug source code or write any Python/Node.js scripts to read debug variables. You already have direct native MCP tools. Use them.**",
             "",
@@ -1394,6 +1331,111 @@ class MyUriHandler implements vscode.UriHandler {
     }
 }
 
+function logTmp(msg: string) {
+    const tmpFile = os.tmpdir() + "/mcu-debug-uri.log";
+    const currentTime = new Date().toLocaleString();
+    fs.appendFileSync(tmpFile, currentTime + ": " + msg + "\n");
+}
+
+class MyUriHandler implements vscode.UriHandler {
+    constructor(private context: vscode.ExtensionContext) {
+        // Nothing to do in the constructor for now
+    }
+    // This function will get run when something redirects to VS Code
+    // with your extension id as the authority.
+    handleUri(uri: vscode.Uri): vscode.ProviderResult<void> {
+        // vscode.window.showInformationMessage(`[mcu-debug] handleUri called with URI: ${uri.toString()}`);
+        logTmp(`[mcu-debug] handleUri called with URI: ${uri.toString()}`);
+        if ((uri.path === "/provision") && uri.query) {
+            // The request is one JSON param (`req`) so every field keeps its real
+            // type — `v` is a number, `args` is an array. (URLSearchParams would
+            // otherwise String()-coerce everything to strings / "[object Object]".)
+            // A `const` (via IIFE) so the narrowing below survives into the async
+            // `.then()` closures where `obj` is used.
+            const obj: ProxyProvisionRequest | undefined = (() => {
+                const raw = new URLSearchParams(uri.query).get("req");
+                if (!raw) {
+                    return undefined;
+                }
+                try {
+                    return JSON.parse(raw) as ProxyProvisionRequest;
+                } catch {
+                    return undefined; // malformed JSON → treat as no valid request
+                }
+            })();
+            logTmp(`[mcu-debug] handleUri parsed request: ${JSON.stringify(obj)}`);
+            if (obj && obj.v === 1 && obj.api && obj.resultsFile) {
+                let error = "";
+                const cmd = `mcu-debug-proxy.${obj.api}`;
+                try {
+                    const args = obj.args || [];
+                    vscode.commands.executeCommand(cmd, ...args).then((res) => {
+                        if (res) {
+                            this.depositProvision(obj, "", res);
+                        } else {
+                            this.depositProvision(obj, `No result returned from command: ${cmd}`, undefined);
+                        }
+                    })
+                } catch (e) {
+                    this.depositProvision(obj, cmd + ': Error: ' + (e ? e.toString() : "unknown error"), undefined);
+                }
+            }
+        }
+    }
+
+    private depositProvision(obj: ProxyProvisionRequest, error: string, result: any) {
+        const results: ProvisioningResults = {
+            resultsFile: obj.resultsFile,
+            error: error,
+            result: result,
+        };
+        logTmp(`[mcu-debug] handleUri parsed request: ${JSON.stringify(obj)}`);
+        vscode.commands.executeCommand("mcu-debug.depositProvision", results).then((reason) => {
+            logTmp(`[mcu-debug] depositProvision completed: ${reason}`);
+        });
+    }
+
+    public validateAuthority(authority: string): Promise<boolean> {
+        return new Promise<boolean>(async (resolve) => {
+            let resolved = false;
+            let permissions = this.context.globalState.get<string[]>("mcu-debug-proxy.authorizedAuthorities", []);
+            if (permissions.includes(authority)) {
+                return resolve(true);
+            }
+            const timer = setTimeout(() => {
+                if (!resolved) {
+                    resolved = true;
+                    return resolve(false);
+                }
+            }, 30_000); // 30 seconds timeout for user to respond
+            const choices = ["Deny", "Allow", "Always Allow"];
+            const result = await vscode.window.showWarningMessage(
+                `The authority "${authority}" is requesting access to the MCU Debug Proxy. Do you want to allow it?`,
+                { modal: true },
+                ...choices
+            );
+
+            if (result === choices[1] || result === choices[2]) {
+                if (result === choices[2]) {
+                    permissions.push(authority);
+                    this.context.globalState.update("mcu-debug-proxy.authorizedAuthorities", permissions);
+                }
+                if (!resolved) {
+                    clearTimeout(timer);
+                    resolved = true;
+                    return resolve(true);
+                }
+            }
+            if (!resolved) {
+                clearTimeout(timer);
+                resolved = true;
+                return resolve(false);
+            }
+        });
+    }
+
+}
+
 export async function activate(context: vscode.ExtensionContext) {
     try {
         console.log("[mcu-debug] Activating mcu-debug extension");
@@ -1438,6 +1480,18 @@ export async function activate(context: vscode.ExtensionContext) {
     } catch (e) {
         console.error(e);
         vscode.window.showErrorMessage(`mcu-debug: Extension initialization failed. Some features may not work. Error: ${e}`);
+    }
+    // Older installations may have a generated sidebar containing only GDB Live Watch.
+    // Reset only our two views once; leave other extensions and user layouts alone.
+    const layoutMigrationKey = "mcu-ai-debug.liveWatchUnifiedLayout.v1";
+    if (!context.globalState.get<boolean>(layoutMigrationKey, false)) {
+        try {
+            await vscode.commands.executeCommand("mcu-debug.liveWatch.resetViewLocation");
+            await vscode.commands.executeCommand("mcu-ai-debug.rttLiveWatch.resetViewLocation");
+            await context.globalState.update(layoutMigrationKey, true);
+        } catch (error) {
+            MCUDebugChannel.debugMessage(`Live Watch sidebar migration will retry on next activation: ${error}`);
+        }
     }
     return ret;
 }

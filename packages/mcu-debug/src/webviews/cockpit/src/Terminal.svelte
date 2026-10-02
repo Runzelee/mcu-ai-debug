@@ -38,7 +38,7 @@
         allowKeyboardInput?: boolean;
     } = $props();
 
-    const FLUSH_INTERVAL_MS = 500;
+    const FLUSH_INTERVAL_MS = 50;
     const MAX_BUFFER_BYTES = 32_000;
 
     let container: HTMLDivElement;
@@ -537,7 +537,9 @@
                 if (msg.tabId !== tabId) return;
                 earlyBuffer = "";
                 buffer = "";
-                term?.clear();
+                if (flushTimer !== null) { clearTimeout(flushTimer); flushTimer = null; }
+                clearSearchResults();
+                term?.reset();
                 break;
             case "restore":
                 if (msg.tabId !== tabId) return;

@@ -462,7 +462,15 @@ export class GDBDebugSession extends SeqDebugSession {
         response.body = { threads: [] };
         try {
             if (this.isBusy()) {
-                this.handleResponseMsg(response, "mcu-debug: Threads request received while target is running. Returning empty thread list.\n");
+                // VS Code needs a thread to dispatch Pause, even before the first stop.
+                const known = this.lastThreadsInfo?.getSortedThreadList() || [];
+                for (const thread of known) {
+                    response.body.threads.push({ id: thread.id, name: thread.name || thread.target_id || `Thread ${thread.id}` });
+                }
+                if (response.body.threads.length === 0) {
+                    response.body.threads.push({ id: this.lastThreadsInfo?.currentThreadId || 1, name: "main" });
+                }
+                this.sendResponse(response);
                 return;
             }
             this.lastThreadsInfo = await this.gdbMiCommands.sendThreadInfoAll();

@@ -16,7 +16,11 @@ export type TabKind = 'uart' | 'rtt' | 'swo' | 'console' | 'cockpit';
 export type TabInputMode = 'raw' | 'cooked' | 'none';
 export type CockpitToolbarAction = 'continue' | 'pause' | 'step-over' | 'step-into' | 'step-out' | 'restart' | 'reset' | 'stop';
 
+export type CockpitSessionMode = 'independent' | 'current';
+
 export interface CockpitUiState {
+    sessionMode: CockpitSessionMode;
+    modeLocked: boolean;
     availableConfigs: string[];
     selectedConfig: string | null;
     statusText: string;
@@ -91,5 +95,7 @@ export type FromUi =
     | { type: 'cockpit-toolbar-action'; tabId: string; action: CockpitToolbarAction }
     /** Engineer selected a launch configuration in the cockpit toolbar. */
     | { type: 'cockpit-config-select'; tabId: string; configName: string }
+    | { type: 'cockpit-mode-select'; tabId: string; mode: CockpitSessionMode }
+    | { type: 'tab-clear'; tabId: string }
     /** User clicked × on a tab. Extension handles actual teardown. */
     | { type: 'tab-close'; tabId: string };

@@ -931,6 +931,30 @@ export class SerialPortManager implements ProxyConnectionDelegate {
         }
     }
 
+    public async prepareSerialPorts(hostConfig?: HostConfig): Promise<void> {
+        const config = await this.resolveProxy(hostConfig || { type: getHostAdapter().getRemoteName() ? "auto" : "local", enabled: true });
+        if (!config?.pvtProxyPort || config.pvtProxyPort <= 0) throw new Error("Could not reach the probe host for UART enumeration");
+        const connection = this.getOrCreateConnection(config);
+        if (!await connection.connect(config)) throw new Error("Could not connect to the UART probe host");
+        await connection.getSerialPrortsList(true);
+    }
+
+    public async openSerialPortForUser(params: SerialParams, proxyKey?: ProxyKey, owner?: string, hostConfig?: HostConfig): Promise<ISerialPortView> {
+        let connection = proxyKey ? this.connections.get(proxyKey) : undefined;
+        if (proxyKey && !connection) throw new Error("The selected UART host disconnected");
+        if (!connection) {
+            const config = await this.resolveProxy(hostConfig || { type: getHostAdapter().getRemoteName() ? "auto" : "local", enabled: true });
+            if (!config?.pvtProxyPort || config.pvtProxyPort <= 0) throw new Error("Could not resolve the UART probe host");
+            connection = this.getOrCreateConnection(config);
+            if (!await connection.connect(config)) throw new Error("Could not connect to the UART probe host");
+        }
+        const info = await connection.openSerialPort({ ...params });
+        if (!info) throw new Error("Serial port could not be opened. Check the device, permissions and whether another application is using it.");
+        await this.createOrUpdateViewWithSerialInfo(connection, info, params, true, owner);
+        const actualPath = resolvedPath(info) || params.path || "";
+        return this.serialPortViews.get(this.ckey(connection, actualPath))!;
+    }
+
     public async createSerialPorts(args: ConfigurationArguments): Promise<void> {
         this.cleanupSerialConfig(args);
         if (!args.serialConfig || !args.serialConfig.enabled || !args.serialConfig.ports || args.serialConfig.ports.length === 0) {
@@ -973,7 +997,7 @@ export class SerialPortManager implements ProxyConnectionDelegate {
                 const pInfoStr = JSON.stringify(pInfo);
                 const configStr = JSON.stringify(portConfig);
                 this.logInfo(`Serial port ${configStr} opened successfully on proxy ${pInfoStr}`);
-                await this.createOrUpdateViewWithSerialInfo(conn, pInfo, portConfig, true);
+                await this.createOrUpdateViewWithSerialInfo(conn, pInfo, portConfig, true, (args as any).pvtSerialSessionToken);
             } catch (e: any) {
                 const sel = JSON.stringify(portConfig);
                 this.logError(`Failed to open serial port ${sel}: ${e.message}`);
@@ -987,7 +1011,7 @@ export class SerialPortManager implements ProxyConnectionDelegate {
      * @param portConfig - Configuration of the serial port originally specification from launch.json
      * @param isNew - Whether this is a fresh open (vs. a reconnect)
      */
-    private async createOrUpdateViewWithSerialInfo(conn: ProxyConnection, pInfo: SerialOpenInfo, portConfig: SerialParams, isNew: boolean = false): Promise<void> {
+    private async createOrUpdateViewWithSerialInfo(conn: ProxyConnection, pInfo: SerialOpenInfo, portConfig: SerialParams, isNew: boolean = false, owner?: string): Promise<void> {
         const log_file = portConfig.log_file;
         const input_mode = portConfig.input_mode;
         const actualPath: string = resolvedPath(pInfo) || portConfig.path || '';
@@ -1019,6 +1043,8 @@ export class SerialPortManager implements ProxyConnectionDelegate {
                 this.removeSerialPortTab(conn, actualPath);
             });
         }
+        view.setSourceHost?.(conn.key, conn.label);
+        if (owner) view.addSessionOwner?.(owner);
         if (isNew) {
             view.notifyConnected(`Serial port ${actualPath} opened successfully on initial launch on tcp port ${host}:${tcpPort}`);
         } else {

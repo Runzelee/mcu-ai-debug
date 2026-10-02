@@ -35,6 +35,8 @@ export interface IDebugSession {
 }
 
 export interface ISerialPortView {
+    addSessionOwner?(owner: string): void;
+    setSourceHost?(key: string, label: string): void;
     readonly emitter: EventEmitter;
     setTcpPort(port: number): void;
     setLogFile(log_file: string | undefined): void;

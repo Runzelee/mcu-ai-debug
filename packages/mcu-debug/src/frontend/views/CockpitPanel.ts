@@ -205,6 +205,9 @@ export class CockpitPanel implements vscode.WebviewViewProvider, CockpitPanelSin
             return;
         }
         switch (msg.type) {
+            case "tab-clear":
+                this.clearTab(msg.tabId);
+                break;
             case "user-input":
                 tab.onUserInput(msg.text);
                 break;
@@ -213,6 +216,9 @@ export class CockpitPanel implements vscode.WebviewViewProvider, CockpitPanelSin
                 break;
             case "cockpit-toolbar-action":
                 tab.onCockpitToolbarAction(msg.action);
+                break;
+            case "cockpit-mode-select":
+                tab.onCockpitModeSelect(msg.mode);
                 break;
             case "cockpit-config-select":
                 tab.onCockpitConfigSelect(msg.configName);

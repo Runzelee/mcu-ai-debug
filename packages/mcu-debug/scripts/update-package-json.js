@@ -28,6 +28,11 @@ function createPlatformProps(name, description) {
 function generateConfiguration() {
     // Group 1: General Settings
     const generalProperties = {
+        "mcu-ai-debug.cockpit.sessionMode": {
+            type: "string", enum: ["independent", "current"], default: "current",
+            enumDescriptions: ["Start an independent session (existing behavior).", "Automatically share this window's VS Code/F5 debug session. No second GDB or debug server."],
+            description: "Default AI Cockpit session mode. The toolbar remembers this window's workspace choice separately. Connections stay bound to their chosen session.",
+        },
         "mcu-debug.enableTelemetry": {
             type: "boolean",
             default: true,
@@ -62,8 +67,8 @@ function generateConfiguration() {
         "mcu-ai-debug.enableMcp": {
             type: "boolean",
             default: false,
-            description: "(Deprecated) Enable the legacy Live Watch MCP server and workspace port file. Disabled by default; use the mcu-debug CLI for AI-assisted debugging.",
-            deprecationMessage: "Deprecated: use the mcu-debug CLI for AI-assisted debugging. This setting remains available for legacy MCP clients.",
+            description: "(Deprecated) Enable the legacy Live Watch MCP server and workspace port file. Disabled by default; use the mcu-ai-debug CLI for AI-assisted debugging.",
+            deprecationMessage: "Deprecated: use the mcu-ai-debug CLI for AI-assisted debugging. This setting remains available for legacy MCP clients.",
         },
         "mcu-ai-debug.mcpRequireManualRecording": {
             type: "boolean",
@@ -263,6 +268,40 @@ function updatePackageJson() {
         for (const target of ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64", "win32-x64"]) {
             delete pkg.scripts[`package:${target}`];
         }
+    }
+
+    // Keep fork-owned Live Watch contributions reproducible with manifest generation.
+    const watchViews = pkg.contributes.views["mcu-ai-debug"];
+    const gdbWatch = watchViews.find(view => view.id === "mcu-debug.liveWatch");
+    if (gdbWatch) {
+        Object.assign(gdbWatch, { name: "GDB Live Watch", contextualTitle: "GDB Live Watch", order: 1 });
+        delete gdbWatch.when;
+    }
+    if (!watchViews.some(view => view.id === "mcu-ai-debug.rttLiveWatch")) watchViews.push({
+        type: "webview", id: "mcu-ai-debug.rttLiveWatch", name: "JSON Live Watch",
+        contextualTitle: "JSON Live Watch", icon: "$(broadcast)", order: 2,
+    });
+    Object.assign(watchViews.find(view => view.id === "mcu-ai-debug.rttLiveWatch"), { name: "JSON Live Watch", contextualTitle: "JSON Live Watch" });
+    const rttCommands = [
+        ["copyFirmwarePrompt", "Copy Firmware Prompt", "$(copy)", ""],
+        ["saveSnapshot", "Save Snapshot", "$(save)", ""],
+        ["startRecording", "Start Recording", "$(record)", " && !mcu-ai-debug:isRttWatchRecording"],
+        ["stopRecording", "Stop Recording", "$(debug-stop)", " && mcu-ai-debug:isRttWatchRecording"],
+        ["openGraph", "Open Real-Time Graph", "$(graph-line)", ""],
+        ["clear", "Clear JSON Samples", "$(clear-all)", ""],
+    ];
+    for (const [action, title, icon, condition] of rttCommands) {
+        const command = `mcu-ai-debug.rttWatch.${action}`;
+        const contribution = pkg.contributes.commands.find(item => item.command === command);
+        if (contribution) Object.assign(contribution, { category: "JSON Live Watch", title, icon });
+        else pkg.contributes.commands.push({ command, category: "JSON Live Watch", title, icon });
+        if (action === "copyFirmwarePrompt") {
+            pkg.contributes.menus["view/title"] = pkg.contributes.menus["view/title"].filter(item => item.command !== command);
+            continue;
+        }
+        if (!pkg.contributes.menus["view/title"].some(item => item.command === command)) pkg.contributes.menus["view/title"].push({
+            command, when: "view == mcu-ai-debug.rttLiveWatch" + condition, group: "navigation",
+        });
     }
 
     // Update configuration

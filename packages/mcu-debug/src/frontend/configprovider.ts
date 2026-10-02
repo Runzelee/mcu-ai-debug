@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import * as vscode from "vscode";
 import { ConfigurationArguments } from "../adapter/servers/common";
 import { McuDebugConfigurationProviderBase } from "../common/config-provider";
@@ -71,6 +72,7 @@ export class McuDebugConfigurationProvider implements vscode.DebugConfigurationP
      * adapter used to echo back in `uart-configure`.
      */
     private openSerialPorts(config: ConfigurationArguments) {
+        (config as any).pvtSerialSessionToken = randomUUID();
         const copy = JSON.parse(JSON.stringify(config)) as ConfigurationArguments;
         this.serialPortManager.createSerialPorts(copy).catch((e) => {
             logger.error(`Failed to open serial ports: ${e instanceof Error ? e.message : String(e)}`);

@@ -7,7 +7,7 @@ const { execFileSync } = require("child_process");
 // 1. Verify Node.js Version
 const nodeMajorVersion = parseInt(process.versions.node.split(".")[0], 10);
 if (nodeMajorVersion < 22) {
-    console.error(`Error: Node.js version is ${process.version}. Node.js >= 22 is required for mcu-debug CLI.`);
+    console.error(`Error: Node.js version is ${process.version}. Node.js >= 22 is required for MCU AI Debug CLI.`);
     process.exit(1);
 }
 
@@ -42,7 +42,7 @@ if (isInPath) {
 }
 
 console.log("====================================================");
-console.log("         mcu-debug CLI Tools Installer");
+console.log("         MCU AI Debug CLI Tools Installer");
 console.log("====================================================");
 console.log(`Wrapper scripts directory: ${binDir}\n`);
 
@@ -104,7 +104,7 @@ if (process.platform === "win32") {
     }
 
     const profilePath = shellName === "zsh" ? path.join(os.homedir(), ".zshrc") : path.join(os.homedir(), ".bashrc");
-    const exportLine = `\n# mcu-debug CLI PATH configuration\nexport PATH="$HOME/.mcu-debug/bin:$PATH"\n`;
+    const exportLine = `\n# MCU AI Debug CLI PATH configuration\nexport PATH="$HOME/.mcu-debug/bin:$PATH"\n`;
 
     console.log(`We will add mcu-debug to your PATH by appending to ${profilePath}`);
     const rl = readline.createInterface({

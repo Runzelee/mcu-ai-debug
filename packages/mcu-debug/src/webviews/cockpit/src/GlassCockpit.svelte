@@ -20,7 +20,7 @@
     import CockpitToolbar from "./CockpitToolbar.svelte";
     import InputBar from "./InputBar.svelte";
     import { postToExtension } from "./vscode";
-    import type { CockpitToolbarAction, CockpitUiState, TabInputMode } from "@mcu-debug/shared";
+    import type { CockpitSessionMode, CockpitToolbarAction, CockpitUiState, TabInputMode } from "@mcu-debug/shared";
 
     const {
         tabId,
@@ -52,6 +52,10 @@
         postToExtension({ type: "cockpit-toolbar-action", tabId, action });
     }
 
+    function handleModeSelect(mode: CockpitSessionMode) {
+        postToExtension({ type: "cockpit-mode-select", tabId, mode });
+    }
+
     function handleConfigSelect(configName: string) {
         postToExtension({ type: "cockpit-config-select", tabId, configName });
     }
@@ -62,6 +66,7 @@
         state={cockpitUi}
         onAction={handleToolbarAction}
         onConfigSelect={handleConfigSelect}
+        onModeSelect={handleModeSelect}
     />
 
     <div class="terminal-region">

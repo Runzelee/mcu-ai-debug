@@ -1,3 +1,4 @@
+import { sessionTelemetry } from './session-telemetry';
 import { RTTCommonDecoderOpts, RTTConsoleDecoderOpts } from "../adapter/servers/common";
 import { getHostAdapter, IDebugSession } from "./host-adapter";
 import { CDebugSession } from "./cli-session";
@@ -19,6 +20,9 @@ export function createRTTSource(mySession: CDebugSession, tcpPort: string, chann
         } else {
             src = new SocketRTTSource(channel, tcpPort, decoderSpec);
         }
+        const decoder = mySession.config.rttConfig?.decoders?.find((item: any) => Number(item.port) === channel);
+        const prefix = `[${String((decoder as any)?.label ?? `RTT#${channel}`).replace(/^\[|\]$/g, '')}]`;
+        src.on('data', (data: Buffer) => sessionTelemetry.emit('data', { sessionId: mySession.session.id, source: 'RTT', prefix, channel, data }));
         mySession.rttPortMap[channel] = src; // Yes, we put this in the list even if start() can fail
         resolve(src); // Yes, it is okay to resolve it even though the connection isn't made yet
         getHostAdapter().debugConsoleMessage(`Connecting to RTT TCP port ${tcpPort} for channel ${channel}...`);

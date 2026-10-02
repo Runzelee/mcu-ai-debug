@@ -15,7 +15,7 @@
 // SPDX-License-Identifier: Apache-2.0
 -->
 <script lang="ts">
-    import type { CockpitToolbarAction, CockpitUiState } from "@mcu-debug/shared";
+    import type { CockpitSessionMode, CockpitToolbarAction, CockpitUiState } from "@mcu-debug/shared";
 
     type ToolbarActionItem = {
         action: CockpitToolbarAction;
@@ -30,10 +30,12 @@
         state,
         onAction,
         onConfigSelect,
+        onModeSelect,
     }: {
         state: CockpitUiState;
         onAction: (action: CockpitToolbarAction) => void;
         onConfigSelect: (configName: string) => void;
+        onModeSelect: (mode: CockpitSessionMode) => void;
     } = $props();
 
     const resetIconUri = typeof document !== "undefined" ? document.body.dataset.resetIcon ?? "" : "";
@@ -97,9 +99,27 @@
         {/each}
     </div>
 
+    <label class="mode-picker">
+        <span class="config-label">Mode</span>
+        <span class="select-control">
+        <select
+            aria-label="AI Cockpit session mode"
+            value={state.sessionMode}
+            disabled={state.modeLocked}
+            title={state.modeLocked ? "Stop the independent session before changing modes" : "Choose how to start the debug session"}
+            onchange={(event) => onModeSelect(event.currentTarget.value as CockpitSessionMode)}
+        >
+            <option value="current">Follow VS Code Debug</option>
+            <option value="independent">Independent GDB Session</option>
+        </select>
+        <span class="codicon codicon-chevron-down select-arrow" aria-hidden="true"></span>
+        </span>
+    </label>
+
     <label class="config-picker">
         <span class="config-label">Config</span>
-        <select value={state.selectedConfig ?? ""} onchange={handleSelect}>
+        <span class="select-control">
+        <select aria-label="Debug configuration" title={state.selectedConfig ?? "No mcu-debug configurations"} value={state.selectedConfig ?? ""} onchange={handleSelect}>
             {#if state.availableConfigs.length === 0}
                 <option value="">No mcu-debug configurations</option>
             {:else}
@@ -108,6 +128,8 @@
                 {/each}
             {/if}
         </select>
+        <span class="codicon codicon-chevron-down select-arrow" aria-hidden="true"></span>
+        </span>
     </label>
 
     <div class="status" aria-live="polite">{state.statusText}</div>
@@ -123,6 +145,7 @@
         background: var(--vscode-editorGroupHeader-tabsBackground, #252526);
         flex-shrink: 0;
         min-height: 34px;
+        flex-wrap: wrap;
     }
 
     .buttons {
@@ -186,7 +209,7 @@
         opacity: 0.55;
     }
 
-    .config-picker {
+    .config-picker, .mode-picker {
         display: flex;
         align-items: center;
         gap: 6px;
@@ -201,18 +224,46 @@
         letter-spacing: 0.04em;
     }
 
+    .select-control {
+        position: relative;
+        display: inline-flex;
+        min-width: 0;
+        max-width: min(280px, 55vw);
+    }
+
+    .select-arrow {
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 16px;
+        font-size: 16px;
+        color: var(--vscode-dropdown-foreground, #f0f0f0);
+        pointer-events: none;
+    }
+
     select {
-        min-width: 220px;
-        max-width: min(420px, 45vw);
+        appearance: none;
+        box-sizing: border-box;
+        min-width: 100px;
+        max-width: 100%;
         height: 24px;
         border: 1px solid var(--vscode-dropdown-border, transparent);
         background: var(--vscode-dropdown-background, #3c3c3c);
         color: var(--vscode-dropdown-foreground, #f0f0f0);
         border-radius: 4px;
-        padding: 0 8px;
+        padding: 0 32px 0 8px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         font: inherit;
         font-size: 12px;
         line-height: 1.2;
+    }
+
+    select:focus-visible {
+        outline: 1px solid var(--vscode-focusBorder, #007fd4);
+        outline-offset: 1px;
     }
 
     .status {
@@ -220,5 +271,9 @@
         color: var(--vscode-descriptionForeground, #9d9d9d);
         font-size: 12px;
         white-space: nowrap;
+    }
+
+    .mode-picker select {
+        width: 180px;
     }
 </style>

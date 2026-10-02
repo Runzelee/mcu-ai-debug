@@ -42,8 +42,8 @@ export class NotesManager {
     private mtime: number = 0;
 
     // We use the same timestamp for the entire session regardless when we actually create/update the various session files
-    constructor(private sessionTimestamp: string) {
-        this.notesFile = `${process.cwd()}/.mcu-debug/notes.json`;
+    constructor(private sessionTimestamp: string, private workspaceRoot = process.cwd()) {
+        this.notesFile = `${this.workspaceRoot}/.mcu-debug/notes.json`;
         this.loadNotes();
     }
 
@@ -176,7 +176,7 @@ export class NotesManager {
             this.writeFileAtomic(this.notesFile, jsonStr);
             this.mtime = fs.statSync(this.notesFile).mtimeMs;
             try {
-                const archiveFile = `${process.cwd()}/.mcu-debug/archive/${this.sessionTimestamp}-notes.json`;
+                const archiveFile = `${this.workspaceRoot}/.mcu-debug/archive/${this.sessionTimestamp}-notes.json`;
                 fs.mkdirSync(path.dirname(archiveFile), { recursive: true });
                 this.writeFileAtomic(archiveFile, jsonStr);
                 logger.debug(`Archived notes to ${archiveFile}`);

@@ -33,6 +33,8 @@
     }
 
     const defaultCockpitUi: CockpitUiState = {
+        sessionMode: "current",
+        modeLocked: false,
         availableConfigs: [],
         selectedConfig: null,
         statusText: "not-started",
@@ -216,7 +218,7 @@
 </script>
 
 <div class="panel" bind:this={panelEl} tabindex="-1" role="presentation" onpointerdown={focusPanelOnPointerDown}>
-    <TabBar {tabs} {activeTabId} onSelect={selectTab} onClose={closeTab} />
+    <TabBar {tabs} {activeTabId} onSelect={selectTab} onClose={closeTab} onClear={(tabId) => postToExtension({ type: "tab-clear", tabId })} />
 
     <div class="content">
         {#if tabs.length > 0}

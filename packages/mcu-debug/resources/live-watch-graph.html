@@ -5,7 +5,7 @@
     <meta http-equiv="Content-Security-Policy"
           content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Watch Graph</title>
+    <title>Real-Time Watch Graph</title>
     <style nonce="${nonce}">
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -16,57 +16,50 @@
             font-size: var(--vscode-font-size, 13px);
             overflow: hidden;
             height: 100vh;
+            width: 100%;
+            min-width: 0;
             display: flex;
             flex-direction: column;
         }
 
         .toolbar {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 6px 12px;
-            background: var(--vscode-titleBar-activeBackground, #1e1e1e);
-            border-bottom: 1px solid var(--vscode-panel-border, #333);
-            flex-shrink: 0;
+            display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+            padding: 8px 12px; background: var(--vscode-editor-background);
+            border-bottom: 1px solid var(--vscode-panel-border); flex-shrink: 0;
         }
-
+        .tool-group { display: flex; align-items: center; gap: 4px; }
         .toolbar button {
-            background: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border: none;
-            padding: 4px 10px;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 12px;
+            display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+            min-height: 28px; padding: 4px 8px; border: 1px solid transparent; border-radius: 4px;
+            background: transparent; color: var(--vscode-foreground); cursor: pointer; font: inherit; font-size: 12px;
         }
-        .toolbar button:hover {
-            background: var(--vscode-button-hoverBackground);
-        }
-        .toolbar button.active {
-            background: var(--vscode-inputValidation-warningBackground, #856404);
-        }
-
-        .toolbar .spacer { flex: 1; }
-
-        .toolbar label {
-            font-size: 12px;
-            color: var(--vscode-descriptionForeground);
-        }
-
+        .toolbar button:hover { background: var(--vscode-toolbar-hoverBackground); }
+        .toolbar button.active { background: var(--vscode-toolbar-activeBackground); border-color: var(--vscode-focusBorder); }
+        button:focus-visible, select:focus-visible, input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+        .icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+        .button-icon { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; flex-shrink: 0; }
+        .toolbar .spacer { flex: 1; min-width: 0; }
+        .toolbar label { font-size: 12px; color: var(--vscode-descriptionForeground); }
+        .control-group { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
         .toolbar select, .toolbar input[type="number"] {
-            background: var(--vscode-input-background);
-            color: var(--vscode-input-foreground);
-            border: 1px solid var(--vscode-input-border, #444);
-            padding: 2px 4px;
-            border-radius: 2px;
-            font-size: 12px;
+            background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+            height: 26px; padding: 2px 6px; border-radius: 3px; font: inherit; font-size: 12px;
         }
-
-        .toolbar input[type="number"] {
-            width: 60px;
-        }
+        .toolbar input[type="number"] { width: 64px; }
+        .graph-status { display: flex; align-items: center; gap: 6px; color: var(--vscode-descriptionForeground); font-size: 11px; }
+        .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--vscode-charts-green, #388a34); }
+        .graph-status.paused .status-dot { background: var(--vscode-charts-yellow, #b89500); }
+        .series-count { color: var(--vscode-descriptionForeground); font-size: 11px; }
+        .empty-state { position: absolute; inset: 0; display: grid; place-content: center; gap: 6px; text-align: center;
+            color: var(--vscode-descriptionForeground); pointer-events: none; padding: 24px; }
+        .empty-state strong { color: var(--vscode-foreground); font-size: 13px; font-weight: 500; }
+        .empty-state span { font-size: 12px; }
+        .empty-state[hidden] { display: none; }
+        @media (max-width: 600px) { .toolbar { gap: 8px; } .toolbar .spacer { display: none; } .series-count { margin-left: auto; } }
 
         .chart-area {
+            min-width: 0;
             flex: 1;
             display: flex;
             flex-direction: column;
@@ -74,6 +67,7 @@
         }
 
         .chart-row {
+            min-width: 0;
             flex: 1;
             display: flex;
             min-height: 0;
@@ -86,6 +80,7 @@
         }
 
         canvas {
+            position: absolute; inset: 0;
             display: block;
             width: 100%;
             height: 100%;
@@ -128,41 +123,17 @@
             cursor: ew-resize;
         }
 
-        .legend {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            padding: 6px 12px;
-            background: var(--vscode-titleBar-activeBackground, #1e1e1e);
-            border-top: 1px solid var(--vscode-panel-border, #333);
-            flex-shrink: 0;
-            max-height: 60px;
-            overflow-y: auto;
-        }
-
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            font-size: 11px;
-            cursor: pointer;
-            opacity: 1;
-            transition: opacity 0.2s;
-        }
-        .legend-item.hidden {
-            opacity: 0.35;
-        }
-
-        .legend-color {
-            width: 12px;
-            height: 3px;
-            border-radius: 1px;
-        }
-
-        .legend-value {
-            color: var(--vscode-descriptionForeground);
-            font-family: var(--vscode-editor-font-family, monospace);
-        }
+        .legend { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px;
+            background: var(--vscode-editor-background); border-top: 1px solid var(--vscode-panel-border);
+            flex-shrink: 0; max-height: 104px; overflow-y: auto; }
+        .legend-item { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 11px;
+            color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border); background: transparent;
+            border-radius: 4px; padding: 4px 7px; min-width: 0; max-width: 100%; cursor: pointer; }
+        .legend-item:hover { background: var(--vscode-toolbar-hoverBackground); }
+        .legend-item.hidden { opacity: 0.45; }
+        .legend-color { width: 10px; height: 3px; border-radius: 1px; flex-shrink: 0; }
+        .legend-name { min-width: 0; max-width: min(320px, 60vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .legend-value { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap; }
 
         .tooltip {
             position: absolute;
@@ -182,32 +153,38 @@
     </style>
 </head>
 <body>
-    <div class="toolbar">
-        <button id="btn-pause" title="Pause/Resume">⏸ Pause</button>
-        <button id="btn-clear" title="Clear Data">🗑 Clear</button>
-        <button id="btn-autofit" title="Auto-scroll / Pan mode toggle">🔒 Auto</button>
+    <svg aria-hidden="true" class="icon-sprite">
+        <symbol id="icon-pause" viewBox="0 0 16 16"><path d="M5 3v10M11 3v10" stroke-width="2.5"/></symbol>
+        <symbol id="icon-play" viewBox="0 0 16 16"><path d="M5 3l8 5-8 5z"/></symbol>
+        <symbol id="icon-clear" viewBox="0 0 16 16"><path d="M3 4h10M6 4V2h4v2M4 4l1 10h6l1-10M7 6v5M9 6v5"/></symbol>
+        <symbol id="icon-auto" viewBox="0 0 16 16"><path d="M3 8a5 5 0 1 0 1-3M3 2v4h4M6 8l2 2 3-4"/></symbol>
+        <symbol id="icon-pan" viewBox="0 0 16 16"><path d="M8 1v14M1 8h14M5 4l3-3 3 3M5 12l3 3 3-3M4 5L1 8l3 3M12 5l3 3-3 3"/></symbol>
+    </svg>
+    <div class="toolbar" role="toolbar" aria-label="Graph controls">
+        <div class="tool-group">
+            <button id="btn-pause" title="Pause graph updates" aria-label="Pause graph updates" aria-pressed="false"><svg class="button-icon" aria-hidden="true"><use href="#icon-pause"/></svg><span class="button-label">Pause</span></button>
+            <button id="btn-clear" title="Clear graph data" aria-label="Clear graph data"><svg class="button-icon" aria-hidden="true"><use href="#icon-clear"/></svg><span>Clear</span></button>
+            <button id="btn-autofit" title="Follow latest samples automatically" aria-label="Follow latest samples automatically" aria-pressed="true"><svg class="button-icon" aria-hidden="true"><use href="#icon-auto"/></svg><span class="button-label">Auto</span></button>
+        </div>
+        <div id="graph-status" class="graph-status" role="status"><span class="status-dot" aria-hidden="true"></span><span id="status-text">Live</span></div>
         <div class="spacer"></div>
-        <label>Time Window:</label>
-        <input type="number" id="timespan" value="10" min="1" max="300" step="1">
-        <label>sec</label>
-        <label style="margin-left:8px">Mode:</label>
-        <select id="mode">
-            <option value="overlay">Overlay</option>
-            <option value="split">Split</option>
-        </select>
+        <div class="control-group"><label for="timespan">Window</label><input type="number" id="timespan" value="10" min="1" max="300" step="1" aria-label="Time window in seconds"><label for="timespan">s</label></div>
+        <div class="control-group"><label for="mode">Layout</label><select id="mode"><option value="overlay">Overlay</option><option value="split">Split</option></select></div>
+        <span class="series-count" id="series-count">0 series</span>
     </div>
     <div class="chart-area">
         <div class="chart-row">
             <div class="chart-container">
-                <canvas id="graph-canvas"></canvas>
+                <canvas id="graph-canvas" role="img" aria-label="Real-time variable graph"></canvas>
+                <div id="empty-state" class="empty-state"><strong>Waiting for samples</strong><span>Selected numeric fields will appear here as data arrives.</span></div>
                 <div class="tooltip" id="tooltip"></div>
             </div>
             <div class="scrollbar-y" title="Y-axis zoom (drag to zoom vertically)">
-                <input type="range" id="slider-y" min="1" max="200" value="100" step="1">
+                <input type="range" id="slider-y" aria-label="Vertical zoom" min="1" max="200" value="100" step="1">
             </div>
         </div>
         <div class="scrollbar-t" title="Time-axis zoom (drag to zoom horizontally)">
-            <input type="range" id="slider-t" min="1" max="200" value="100" step="1">
+            <input type="range" id="slider-t" aria-label="Time zoom" min="1" max="200" value="100" step="1">
         </div>
     </div>
     <div class="legend" id="legend"></div>

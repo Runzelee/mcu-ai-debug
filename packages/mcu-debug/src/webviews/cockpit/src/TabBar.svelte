@@ -18,11 +18,12 @@
 <script lang="ts">
     import type { TabDescriptor, TabState } from '@mcu-debug/shared';
 
-    const { tabs, activeTabId, onSelect, onClose }: {
+    const { tabs, activeTabId, onSelect, onClose, onClear }: {
         tabs: TabDescriptor[];
         activeTabId: string | null;
         onSelect: (tabId: string) => void;
         onClose: (tabId: string) => void;
+        onClear: (tabId: string) => void;
     } = $props();
 
     function stateClass(state: TabState): string {
@@ -58,6 +59,7 @@
             case 'rtt':     return '⟳';
             case 'swo':     return '◈';
             case 'cockpit': return '◉';
+            case 'console': return '›';
         }
     }
 
@@ -109,9 +111,18 @@
             {/if}
         </button>
     {/each}
+    <div class="tab-actions">
+        <button class="clear-button" type="button" title="Clear Terminal" aria-label="Clear Terminal" disabled={!activeTabId} onclick={() => activeTabId && onClear(activeTabId)}>
+            <span class="codicon codicon-clear-all" aria-hidden="true"></span>
+        </button>
+    </div>
 </div>
 
 <style>
+    .tab-actions { margin-left: auto; position: sticky; right: 0; display: flex; align-items: center; padding: 0 5px; background: var(--vscode-editorGroupHeader-tabsBackground, #252526); }
+    .clear-button { display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; border: none; border-radius: 3px; background: transparent; color: var(--vscode-icon-foreground); cursor: pointer; }
+    .clear-button:hover { background: var(--vscode-toolbar-hoverBackground); }
+    .clear-button:disabled { opacity: 0.4; cursor: default; }
     .tab-bar {
         display: flex;
         flex-direction: row;

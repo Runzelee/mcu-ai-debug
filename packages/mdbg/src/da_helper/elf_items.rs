@@ -189,7 +189,11 @@ impl ObjectInfo {
     }
 
     pub fn sort_globals_and_statics(&mut self) {
-        self.global_symbols.sort_by_key(|s| s.name.clone());
+        self.global_symbols
+            .sort_by(|a, b| a.name.cmp(&b.name).then(a.address.cmp(&b.address)));
+        // Headers can declare the same global in many compilation units.
+        self.global_symbols
+            .dedup_by(|a, b| a.name == b.name && a.address == b.address);
         self.static_file_mapping.sort_symbols();
     }
 }

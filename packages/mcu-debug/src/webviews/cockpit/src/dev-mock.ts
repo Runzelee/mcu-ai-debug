@@ -54,6 +54,7 @@ export function startMock() {
         tab: {
             tabId: TABS.uart0,
             kind: 'uart',
+            placeholderText: "Enter command",
             label: 'ttyUSB0',
             direction: 'both',
             state: { kind: 'active' },
@@ -65,6 +66,7 @@ export function startMock() {
         tab: {
             tabId: TABS.uart1,
             kind: 'uart',
+            placeholderText: "Enter command",
             label: 'COM3',
             direction: 'both',
             state: { kind: 'active' },
@@ -76,6 +78,7 @@ export function startMock() {
         tab: {
             tabId: TABS.rtt0,
             kind: 'rtt',
+            placeholderText: "Enter command",
             label: 'RTT#0',
             direction: 'rx',
             state: { kind: 'active' },
@@ -87,6 +90,7 @@ export function startMock() {
         tab: {
             tabId: TABS.cockpit,
             kind: 'cockpit',
+            placeholderText: "Enter command",
             label: 'Glass Cockpit',
             state: { kind: 'active' },
         },

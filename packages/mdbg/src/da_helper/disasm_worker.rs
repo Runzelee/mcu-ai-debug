@@ -262,6 +262,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local mylfs/proj_cm4.elf fixture and ARM objdump"]
     fn disasm_from_file() {
         let path = "../../mylfs/proj_cm4.elf";
         let out_path = "../../tmp/disasm_output.txt";
@@ -297,6 +298,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local mylfs/proj_cm4.elf fixture and ARM objdump"]
     fn test_get_window_instruction_offset() {
         let path = "../../mylfs/proj_cm4.elf";
         let listing = match get_disasm_from_objdump("arm-none-eabi-objdump", path) {

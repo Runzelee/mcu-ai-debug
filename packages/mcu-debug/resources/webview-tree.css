@@ -218,3 +218,17 @@ input {
     z-index: 1999;
     background: transparent;
 }
+
+/* The RTT copy action belongs to the empty message, with no separate onboarding row. */
+.firmware-prompt-link {
+    display: inline;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--vscode-textLink-foreground);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.firmware-prompt-link:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
+.firmware-prompt-link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }

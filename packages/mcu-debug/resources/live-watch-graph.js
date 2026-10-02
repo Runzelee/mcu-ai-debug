@@ -35,23 +35,44 @@
     let zoomY = 1.0;           // Y zoom
 
     // --- Palette ---
-    const PALETTE = [
+    const DARK_PALETTE = [
         "#4fc3f7", "#81c784", "#ffb74d", "#e57373",
         "#ba68c8", "#4dd0e1", "#fff176", "#f06292",
         "#aed581", "#64b5f6", "#ff8a65", "#a1887f",
         "#90a4ae", "#dce775", "#7986cb", "#4db6ac",
     ];
 
+    const LIGHT_PALETTE = ["#006fb3", "#168044", "#a55b00", "#bf3030", "#854ca3", "#007c89", "#7b7100", "#b93670", "#537c18", "#3156ba", "#b34d21", "#795548", "#496570", "#667200", "#595ac0", "#007a66"];
+    let PALETTE = document.body.classList.contains("vscode-light") || document.body.classList.contains("vscode-high-contrast-light") ? LIGHT_PALETTE : DARK_PALETTE;
+
+    function syncToolbar() {
+        btnPause.querySelector("use").setAttribute("href", paused ? "#icon-play" : "#icon-pause");
+        btnPause.querySelector(".button-label").textContent = paused ? "Resume" : "Pause";
+        btnPause.setAttribute("aria-pressed", String(paused));
+        btnPause.title = paused ? "Resume graph updates" : "Pause graph updates";
+        btnPause.setAttribute("aria-label", btnPause.title);
+        btnAutofit.querySelector("use").setAttribute("href", panMode ? "#icon-pan" : "#icon-auto");
+        btnAutofit.querySelector(".button-label").textContent = panMode ? "Pan" : "Auto";
+        btnAutofit.setAttribute("aria-pressed", String(!panMode));
+        btnAutofit.classList.toggle("active", !panMode);
+        btnAutofit.title = panMode ? "Resume automatic following" : "Switch to manual pan and zoom";
+        btnAutofit.setAttribute("aria-label", btnAutofit.title);
+        document.getElementById("graph-status").classList.toggle("paused", paused);
+        document.getElementById("status-text").textContent = paused ? "Paused" : "Live";
+    }
+    syncToolbar();
+
     // --- Toolbar events ---
     btnPause.addEventListener("click", () => {
         paused = !paused;
-        btnPause.textContent = paused ? "\u25b6 Resume" : "\u23f8 Pause";
+        syncToolbar();
         btnPause.classList.toggle("active", paused);
     });
 
     btnClear.addEventListener("click", () => {
         for (const ch of channels) { ch.data = []; }
         startTime = 0;
+        document.getElementById("empty-state").hidden = false;
         resetView();
     });
 
@@ -60,10 +81,10 @@
             // Switch back to auto-scroll
             panMode = false;
             resetView();
-            btnAutofit.textContent = "\ud83d\udd12 Auto";
-            btnAutofit.classList.remove("active");
+            syncToolbar();
             canvas.style.cursor = "crosshair";
-        }
+        } else enterPanMode();
+        syncToolbar();
     });
 
     timespanInput.addEventListener("change", () => {
@@ -83,13 +104,13 @@
         zoomY = 1.0;
         sliderY.value = 100;
         sliderT.value = 100;
+        syncToolbar();
     }
 
     function enterPanMode() {
         if (!panMode) {
             panMode = true;
-            btnAutofit.textContent = "\ud83d\udd13 Auto";
-            btnAutofit.classList.add("active");
+            syncToolbar();
             canvas.style.cursor = "grab";
         }
     }
@@ -103,6 +124,7 @@
         ctx.scale(dpr, dpr);
     }
     window.addEventListener("resize", resizeCanvas);
+    new ResizeObserver(resizeCanvas).observe(canvas.parentElement);
     resizeCanvas();
 
     // --- Mouse interaction ---
@@ -153,8 +175,7 @@
     // Double-click = reset view to auto-scroll
     canvas.addEventListener("dblclick", () => {
         resetView();
-        btnAutofit.textContent = "\ud83d\udd12 Auto";
-        btnAutofit.classList.remove("active");
+        syncToolbar();
         canvas.style.cursor = "crosshair";
     });
 
@@ -219,12 +240,13 @@
     });
 
     // --- Configure channels ---
-    function configure(keys) {
+    function configure(keys, labels = {}) {
         channels = keys.map((key, i) => ({
-            key, color: PALETTE[i % PALETTE.length], visible: true, data: [], plotInfo: null,
+            key, label: labels[key] || key, color: PALETTE[i % PALETTE.length], visible: true, data: [], plotInfo: null,
         }));
         startTime = 0;
         resetView();
+        document.getElementById("series-count").textContent = `${channels.length} series`;
         buildLegend();
     }
 
@@ -232,15 +254,20 @@
     function buildLegend() {
         legendEl.innerHTML = "";
         for (const ch of channels) {
-            const item = document.createElement("div");
+            const item = document.createElement("button");
+            item.type = "button"; item.title = ch.key; item.setAttribute("aria-pressed", String(ch.visible));
             item.className = "legend-item" + (ch.visible ? "" : " hidden");
-            item.innerHTML =
-                `<span class="legend-color" style="background:${ch.color}"></span>` +
-                `<span class="legend-name">${ch.key}</span>` +
-                `<span class="legend-value" id="lv-${ch.key}"></span>`;
+            const color = document.createElement("span");
+            color.className = "legend-color"; color.style.background = ch.color;
+            const name = document.createElement("span");
+            name.className = "legend-name"; name.textContent = ch.label;
+            const value = document.createElement("span");
+            value.className = "legend-value"; value.id = "lv-" + ch.key;
+            item.append(color, name, value);
             item.addEventListener("click", () => {
                 ch.visible = !ch.visible;
                 item.classList.toggle("hidden", !ch.visible);
+                item.setAttribute("aria-pressed", String(ch.visible));
             });
             legendEl.appendChild(item);
         }
@@ -257,19 +284,29 @@
                 if (!isNaN(v)) ch.data.push({ t, v });
             }
         }
+        document.getElementById("empty-state").hidden = channels.some(ch => ch.data.length > 0);
         // Trim old data
         const cutoff = t - timespanSec * 3;
         for (const ch of channels) {
             while (ch.data.length > 0 && ch.data[0].t < cutoff) ch.data.shift();
+            if (ch.data.length > 20000) ch.data.splice(0, ch.data.length - 20000);
         }
     }
 
     // --- Drawing constants ---
-    // --- Drawing constants ---
     const MARGIN = { top: 40, right: 60, bottom: 30, left: 65 };
-    const GRID_COLOR = "rgba(255,255,255,0.07)";
-    const AXIS_COLOR = "rgba(255,255,255,0.3)";
-    const CURSOR_COLOR = "rgba(255,255,255,0.15)";
+    let GRID_COLOR, AXIS_COLOR, CURSOR_COLOR;
+    function updateTheme() {
+        PALETTE = document.body.classList.contains("vscode-light") || document.body.classList.contains("vscode-high-contrast-light") ? LIGHT_PALETTE : DARK_PALETTE;
+        channels.forEach((ch, i) => ch.color = PALETTE[i % PALETTE.length]);
+        buildLegend();
+        const css = getComputedStyle(document.body);
+        GRID_COLOR = css.getPropertyValue("--vscode-panel-border").trim() || "#777";
+        AXIS_COLOR = css.getPropertyValue("--vscode-descriptionForeground").trim() || "#888";
+        CURSOR_COLOR = css.getPropertyValue("--vscode-focusBorder").trim() || "#007acc";
+    }
+    updateTheme();
+    new MutationObserver(updateTheme).observe(document.body, {attributes:true, attributeFilter:["class","style"]});
 
     function fmtVal(v) {
         if (Math.abs(v) >= 1e6 || (Math.abs(v) < 0.001 && v !== 0)) return v.toExponential(2);
@@ -415,7 +452,7 @@
             ctx.font = "11px sans-serif";
             ctx.textBaseline = "bottom"; // Prevent state leakage from drawGrid
             ctx.textAlign = "left";
-            ctx.fillText(ch.key, MARGIN.left + 5, ofsY - 4);
+            ctx.fillText(ch.label, MARGIN.left + 5, ofsY - 4);
 
             drawGrid(MARGIN.left, ofsY, plotW, plotH, tMin, tMax, yMin, yMax, i === n - 1);
 
@@ -531,7 +568,7 @@
             }
             const effectiveSpan = timespanSec / zoomT;
             if (closest && minDist < effectiveSpan * 0.05) {
-                lines.push(`${ch.key}: ${fmtVal(closest.v)}`);
+                lines.push(`${ch.label}: ${fmtVal(closest.v)}`);
 
                 if (ch.plotInfo) {
                     const info = ch.plotInfo;
@@ -592,7 +629,7 @@
     window.addEventListener("message", (event) => {
         const msg = event.data;
         switch (msg.type) {
-            case "configure": configure(msg.keys); break;
+            case "configure": configure(msg.keys, msg.labels); break;
             case "data":
                 if (!paused) pushData(msg.timestamp, msg.values);
                 break;

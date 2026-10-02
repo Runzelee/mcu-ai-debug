@@ -88,8 +88,8 @@ export class LiveWatchMcpServer {
                         description: "Add a C/C++ expression to the Live Watch panel for real-time monitoring.",
                         inputSchema: {
                             type: "object",
-                            properties: { expr: { type: "string", description: "A valid C/C++ expression (e.g. 'g_motor.speed', 'adc_buffer[0]')." } },
-                            required: ["expr"]
+                            properties: { userRequested: { type: "boolean", const: true, description: "True only when the user explicitly requests this panel change." }, expr: { type: "string", description: "A valid C/C++ expression (e.g. 'g_motor.speed', 'adc_buffer[0]')." } },
+                            required: ["expr", "userRequested"]
                         }
                     },
                     {
@@ -283,6 +283,9 @@ export class LiveWatchMcpServer {
                 }
 
                 case "add_livewatch_variable": {
+                    if (request.params.arguments?.userRequested !== true) {
+                        return { content: [{ type: 'text', text: 'Adding panel variables requires an explicit user request (userRequested: true).' }], isError: true };
+                    }
                     if (!this.isDebugActive()) {
                         return { content: [{ type: "text", text: JSON.stringify({ status: "NO_DEBUG_SESSION" }, null, 2) }], isError: true };
                     }
@@ -291,7 +294,7 @@ export class LiveWatchMcpServer {
                         return { content: [{ type: "text", text: JSON.stringify({ status: "ERROR", error: "Missing required argument 'expr'." }, null, 2) }], isError: true };
                     }
                     try {
-                        this.liveWatchProvider.addWatchExpr(exprAdd);
+                        await this.liveWatchProvider.addWatchExpr(exprAdd);
                         return { content: [{ type: "text", text: JSON.stringify({ status: "OK", expression: exprAdd }, null, 2) }] };
                     } catch (err: any) {
                         return { content: [{ type: "text", text: JSON.stringify({ status: "ERROR", error: err.message }, null, 2) }], isError: true };

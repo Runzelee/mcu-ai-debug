@@ -39,7 +39,7 @@ export class CLIRTTTerminal {
             }
             const ts = options.timestamp ? HrTimer.createDateTimestamp() + " " : "";
             logger.info(clean || ts ? `${source} ${ts}${clean}` : source, { source: this.kind, isConsole: true });
-        });
+        }, 20, true);
         this.binaryFormatter = new BinaryFormatter(this!, this.options.encoding, this.options.scale);
         this.connectToSource();
     }
