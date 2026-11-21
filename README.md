@@ -76,6 +76,7 @@ The **MCU AI Debug** sidebar contains **GDB Live Watch** above **JSON Live Watch
 - Select a C/C++ expression in the editor, right-click and choose **Add to Live Watch**. The same action is available from the Command Palette.
 - Use **+** in GDB Live Watch to enter an expression directly.
 - Use the checklist action to enter batch-edit mode. Paste one expression per line, select expressions to add, or select existing top-level watches for removal.
+- Hover over a top-level watch and choose **Edit comment** (the speech bubble) to add a workspace note, such as `实际转速（转/分）`. Press Enter to save, Escape to cancel, or save an empty comment to remove it. Long expressions and comments wrap when the sidebar is narrow.
 
 ![right_click](packages/mcu-debug/images/right-click.png)
 

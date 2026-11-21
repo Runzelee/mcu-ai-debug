@@ -53,6 +53,7 @@ exports.run=async({vscode,api,rttConnection,uartConnection,base,port})=>{
         rttConnection.write('buzzer_debug='+JSON.stringify({frequency_hz:4030,nested:{gain:3},text:'<img src=x onerror="bad()">'})+'\n');
         await until(()=>evaluate(`!${td}.querySelector('#copy-firmware-prompt') && ${td}.body.textContent.includes('frequency_hz')`,tree));
         assert.equal(await evaluate(`${td}.querySelectorAll('img').length`,tree),0,'RTT values must be rendered as text');
+        assert.equal(await evaluate(`!!${td}.querySelector('.edit-comment')`,tree),false,'JSON watches have no comment action');
         assert(await evaluate(`${td}.body.textContent.includes('<img src=x')`,tree));
         const graph=await getSession('#graph-canvas'),gd=find('#graph-canvas');
         const run=expression=>evaluate(`(()=>{const d=${gd};${expression}})()`,graph);
@@ -80,6 +81,42 @@ exports.run=async({vscode,api,rttConnection,uartConnection,base,port})=>{
         assert(metrics.scroll<=metrics.width+1 && metrics.overflow.length===0,'Graph must fit narrow editor (1 px fractional layout tolerance)');
         await run('d.querySelector("#btn-clear").click();');
         assert.equal(await run('return d.querySelector("#empty-state").hidden;'),false);
+        await vscode.commands.executeCommand('mcu-debug.liveWatch.focus');
+        const gdbSelector = 'body[data-readonly="false"]';
+        const gdbFrame = await getSession(gdbSelector);
+        const expression = 'controller.thermometer.calibration.reference_temperature_millidegrees';
+        const provider = api.liveWatchProvider;
+        const watch = provider.rootNode.addChild(expression, expression, "17", "int", 0);
+        provider.fire();
+        const row = `${find(gdbSelector)}.getElementById("tree-root").querySelector(${JSON.stringify('li[data-id="' + watch.id + '"]')})`;
+        const button = `${row}?.querySelector(".edit-comment")`;
+        const note = `${row}?.querySelector(".watch-comment")`;
+        const input = vscode.window.showInputBox;
+        try {
+            await until(() => evaluate(`!!${button}`, gdbFrame));
+            const fullNameFits = await evaluate(`(() => {
+                const label = ${row}.querySelector('.label');
+                return label.scrollWidth <= label.clientWidth + 1;
+            })()`, gdbFrame);
+            assert(fullNameFits, 'The long expression should fit the name column or wrap');
+
+            const comment = '温度 / °C <em>采样</em> 🧪';
+            vscode.window.showInputBox = async () => comment;
+            await evaluate(`${button}.click()`, gdbFrame);
+            await until(() => evaluate(`${note}?.textContent === ${JSON.stringify(comment)}`, gdbFrame));
+            assert.equal(await evaluate(`${note}.childElementCount`, gdbFrame), 0);
+            assert.equal(await evaluate(`${row}.querySelector('.label').textContent.trim()`, gdbFrame), expression);
+            await capture('gdb-live-watch-comment');
+
+            let previous;
+            vscode.window.showInputBox = async options => { previous = options.value; return ''; };
+            await evaluate(`${button}.click()`, gdbFrame);
+            await until(() => evaluate(`!${note}`, gdbFrame));
+            assert.equal(previous, comment);
+        } finally {
+            vscode.window.showInputBox = input;
+            provider.removeWatchExpr(watch);
+        }
         fs.writeFileSync(`${base}/rtt-real-ui.json`,JSON.stringify({copyEnglishPrompt:true,inlineEmptyPromptOnly:true,readonlyTree:true,noHtmlInjection:true,svgToolbar:true,pauseResume:true,autoPan:true,clear:true,darkLightNarrow:true,hardware:false}));
     }catch(e){await capture('rtt-ui-failed');throw e;}finally{await call('Emulation.clearDeviceMetricsOverride');await vscode.workspace.getConfiguration('workbench').update('colorTheme','Default Dark Modern',vscode.ConfigurationTarget.Global);socket.close();}
 };

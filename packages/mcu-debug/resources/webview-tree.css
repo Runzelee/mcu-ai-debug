@@ -153,6 +153,49 @@ input {
     display: flex;
 }
 
+/* Keep GDB expressions readable as the sidebar and its inline controls resize. */
+body[data-readonly="false"] .label {
+    min-width: 0;
+    max-width: none;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    overflow: visible;
+    text-overflow: clip;
+}
+body[data-readonly="false"] .value {
+    flex: 1 1 auto;
+    min-width: min(9ch, 25%);
+}
+body[data-readonly="false"] .actions {
+    position: static;
+    flex: none;
+}
+
+body[data-readonly="false"] .tree-content:focus-within .actions {
+    display: flex;
+}
+body[data-readonly="false"] .edit-comment {
+    padding: 0;
+    border: 0;
+    background: none;
+}
+.watch-comment {
+    padding: 0 5px 3px 16px;
+    color: var(--vscode-descriptionForeground);
+    cursor: text;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 430px) {
+    body[data-readonly="false"] .tree-content:has(> .actions):is(:hover, :focus-within) {
+        padding-bottom: 22px;
+    }
+    body[data-readonly="false"] .tree-content:is(:hover, :focus-within) .actions {
+        position: absolute;
+        bottom: 0;
+    }
+}
+
 .actions .codicon {
     margin-left: 4px;
     cursor: pointer;
