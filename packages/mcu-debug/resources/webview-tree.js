@@ -101,6 +101,7 @@ function generateItemContentHtml(item, isTopLevel) {
             <div class="actions">
                 <span class="codicon codicon-edit" onclick="editLabel(event, '${item.id}')" title="Edit Expression"></span>
                 ${editValueButton}
+                <button type="button" class="edit-comment codicon codicon-comment" aria-label="Edit comment" title="Edit comment" onclick="editComment(event)"></button>
                 ${hexFormat}
                 <span class="codicon codicon-arrow-up" onclick="moveUp(event, '${item.id}')" title="Move Up"></span>
                 <span class="codicon codicon-arrow-down" onclick="moveDown(event, '${item.id}')" title="Move Down"></span>
@@ -151,6 +152,28 @@ function generateItemContentHtml(item, isTopLevel) {
     `;
 }
 
+function renderItemContent(contentDiv, item, isTopLevel) {
+    const html = generateItemContentHtml(item, isTopLevel);
+    if (contentDiv.innerHTML !== html) {
+        contentDiv.innerHTML = html;
+    }
+
+    if (!isTopLevel || readOnlyTree || item.id === "dummy-msg") return;
+    contentDiv.tabIndex = 0;
+    let note = contentDiv.nextElementSibling;
+    if (!note?.classList.contains("watch-comment")) note = undefined;
+    if (item.comment) {
+        if (!note) {
+            note = document.createElement("div");
+            note.className = "watch-comment";
+            contentDiv.after(note);
+        }
+        if (note.textContent !== item.comment) note.textContent = item.comment;
+    } else {
+        note?.remove();
+    }
+}
+
 function updateItems(items) {
     items.forEach((newItem) => {
         const existingItem = itemMap.get(newItem.id);
@@ -163,10 +186,7 @@ function updateItems(items) {
                 const contentDiv = li.querySelector(".tree-content");
                 if (contentDiv) {
                     const isTopLevel = li.parentElement && li.parentElement.parentElement && li.parentElement.parentElement.id === "tree-root";
-                    const newHtml = generateItemContentHtml(existingItem, isTopLevel);
-                    if (contentDiv.innerHTML !== newHtml) {
-                        contentDiv.innerHTML = newHtml;
-                    }
+                    renderItemContent(contentDiv, existingItem, isTopLevel);
                 }
             }
         }
@@ -209,12 +229,7 @@ function renderChildren(parent, children) {
             contentDiv = li.querySelector(".tree-content");
         }
 
-        const isTopLevel = !parent;
-        const newHtml = generateItemContentHtml(item, isTopLevel);
-
-        if (contentDiv.innerHTML !== newHtml) {
-            contentDiv.innerHTML = newHtml;
-        }
+        renderItemContent(contentDiv, item, !parent);
 
         let childContainer = document.getElementById("children-" + item.id);
         if (item.hasChildren) {
@@ -459,6 +474,12 @@ window.editLabel = (event, id) => {
     if (labelSpan) {
         startEdit(labelSpan, id, "label");
     }
+};
+
+window.editComment = (event) => {
+    event.stopPropagation();
+    const id = event.currentTarget.closest(".tree-item").dataset.id;
+    vscode.postMessage({ type: "editComment", id });
 };
 
 window.editValue = (event, id) => {

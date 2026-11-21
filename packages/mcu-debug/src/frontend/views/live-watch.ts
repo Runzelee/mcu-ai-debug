@@ -77,6 +77,7 @@ export class LiveVariableNode {
     public childrenLoaded: boolean = false;
     public sizeof: number = 0;
     public editable: boolean = true;
+    public comment = "";
     public addressOf: string = "";
     protected prevValue: string = "";
     protected format: NodeFormat = "natural";
@@ -303,6 +304,7 @@ export class LiveVariableNode {
         const ret = {
             id: this.id,
             label: name,
+            comment: this.comment,
             actualValue: this.value,
             value: this.value ? this.getDisplayValue() : "not available",
             hasChildren: this.isComposite() || (this.children && this.children.length > 0),
@@ -603,6 +605,7 @@ export class LiveVariableNode {
         const item: NodeState = {
             name: this.name,
             expr: this.expr,
+            comment: this.comment || undefined,
             expanded: this.expanded || !this.parent,
             children: [],
         };
@@ -622,6 +625,9 @@ export class LiveVariableNode {
     }
 
     public deSerialize(state: NodeState): void {
+        if (this.isRootChild() && typeof state.comment === "string") {
+            this.comment = state.comment;
+        }
         for (const child of state.children) {
             if (!this.children) {
                 this.children = [];
@@ -674,6 +680,7 @@ class LiveVariableNodeMsg extends LiveVariableNode {
 interface NodeState {
     name: string;
     expr: string;
+    comment?: string;
     expanded: boolean;
     children: NodeState[];
 }
@@ -753,6 +760,23 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
                 }
             }
         }
+    }
+
+    async onEditComment(id: string): Promise<void> {
+        const node = this.rootNode.getChildren().find(child => child.id === id);
+        if (!node) return;
+
+        const input = await vscode.window.showInputBox({
+            prompt: `Comment for ${node.getExpr()} (leave empty to remove)`,
+            value: node.comment,
+        });
+        if (input === undefined || !this.rootNode.getChildren().includes(node)) return;
+        const comment = input.trim();
+        if (comment === node.comment) return;
+
+        node.comment = comment;
+        await this.saveState();
+        this.updateComposite([node.toWebviewTreeItem()]);
     }
 
     async onEditValue(item: WebviewTreeItem, newValue: string): Promise<void> {
@@ -1217,11 +1241,13 @@ export class LiveWatchTreeProvider implements TreeViewProviderDelegate, GdbMapUp
         this.currentRefreshRate = rate;
     }
 
-    public saveState() {
+    public async saveState(): Promise<void> {
         const state = this.context.workspaceState;
         const data = this.rootNode.serialize();
-        state.update(VERSION_ID, LiveWatchTreeProvider.stateVersion);
-        state.update(WATCH_LIST_STATE, data);
+        await Promise.all([
+            state.update(VERSION_ID, LiveWatchTreeProvider.stateVersion),
+            state.update(WATCH_LIST_STATE, data),
+        ]);
     }
 
     public isSameSession(session: IDebugSession): boolean {

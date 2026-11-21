@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 export interface TreeItem {
     id: string;
     label: string;
+    comment?: string;
     actualValue?: string;
     value?: string;
     format?: string;
@@ -17,6 +18,7 @@ export interface TreeViewProviderDelegate {
     getChildren(element?: TreeItem): Promise<TreeItem[]>;
     onEditName(item: TreeItem, newValue: string): Promise<void>;
     onEditValue(item: TreeItem, newValue: string): Promise<void>;
+    onEditComment?(id: string): Promise<void>;
     onDelete?(item: TreeItem): Promise<void>;
     onAdd?(value: string): Promise<void>;
     onAddMany?(value: string): Promise<BatchOperationResult>;
@@ -79,6 +81,9 @@ export class EditableTreeViewProvider implements vscode.WebviewViewProvider {
                 case "getChildren":
                     const children = await this._delegate.getChildren(data.element);
                     this._view?.webview.postMessage({ type: "setChildren", element: data.element, children });
+                    break;
+                case "editComment":
+                    await this._delegate.onEditComment?.(data.id);
                     break;
                 case "beginEdit":
                     const fieldName = data.field === "label" ? "Expression" : "Value";
